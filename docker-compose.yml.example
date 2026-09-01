@@ -1,0 +1,54 @@
+services:
+  slopbox:
+    image: whosmatt/slopbox:latest
+    container_name: slopbox
+    init: true
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # OpenAI compatible API
+      QWEN_API_KEY: "xxx"
+      # Guards /admin/reset and /admin/rollback. Leave empty to disable them.
+      ADMIN_TOKEN: "xxx"
+
+      QWEN_BASE_URL: "https://inference.hetzner.com/api/v1"
+      QWEN_MODEL: "Qwen/Qwen3.6-35B-A3B-FP8"
+      DATA_DIR: "/data"
+
+      # Agent limits. app/config.py carries the same defaults, so any line below
+      # can simply be deleted rather than tuned.
+      MAX_STEPS: "14"
+      REASONING_EFFORT: "low"
+      MAX_TOKENS: "12000"
+      MAX_CONTEXT_CHARS: "240000"
+      MAX_CSS_BYTES: "100000"
+      MAX_PROMPT_CHARS: "600"
+
+      # Published stylesheet versions kept on disk; oldest pruned on every write.
+      HISTORY_KEEP: "20"
+
+      # Prompts per IP per window.
+      RATE_LIMIT_COUNT: "5"
+      RATE_LIMIT_WINDOW_SEC: "120"
+
+      # Leave empty unless a reverse proxy sits in front - see the README. An
+      # X-Forwarded-For from an untrusted peer would defeat the rate limiter.
+      TRUSTED_PROXIES: ""
+    volumes:
+      # Runtime volume
+      - slopbox-data:/data
+      # Only needed to run the browser test suite from a checkout; the image
+      # itself ships without tests.
+      - ./tests:/app/tests:ro
+    tmpfs:
+      # Chromium's scratch space, wiped on every restart.
+      - /tmp:size=256m
+    # Chromium is memory-hungry; cap it so a runaway render cannot take the host.
+    mem_limit: 2g
+    shm_size: 512m
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  slopbox-data:

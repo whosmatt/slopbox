@@ -13,11 +13,20 @@ stylesheet.
 ## Running it
 
 ```bash
-cp .env.example .env      # then put your inference token in it
-docker compose up -d --build
+cp docker-compose.yml.example docker-compose.yml   # then fill in the two secrets
+docker compose up -d
 ```
 
-Open <http://localhost:8000>.
+Open <http://localhost:8000>. That pulls the published image; there is nothing to
+build locally.
+
+`docker-compose.yml` holds the API token inline and is gitignored for that
+reason - `docker-compose.yml.example` is the tracked template. The flip side is
+that the live file is not version-controlled, so mirror any setting you change
+back into the example.
+
+To roll out a newer build, `pull_policy: always` means a plain
+`docker compose up -d` is enough.
 
 ## How a prompt becomes a stylesheet
 
@@ -144,7 +153,9 @@ Disk footprint is bounded by construction, not by a cleanup job:
 
 ## Configuration
 
-See `.env.example`. Worth knowing:
+Everything is set in `docker-compose.yml` under `environment:`, and
+`app/config.py` carries the same defaults - so any line there can be deleted
+rather than tuned. Worth knowing:
 
 - `TRUSTED_PROXIES` - empty by default, meaning `X-Forwarded-For` is **not**
   believed. Set it to your reverse proxy's address if you put one in front,

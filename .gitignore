@@ -1,7 +1,11 @@
-# secrets
+# secrets - the live compose file holds the API token inline, so it must never
+# be committed. docker-compose.yml.example is the tracked template.
+docker-compose.yml
+!docker-compose.yml.example
+
+# kept as a safety net in case a .env is ever reintroduced
 .env
 *.env
-!.env.example
 
 # runtime state (regenerated, must never be committed)
 data/
