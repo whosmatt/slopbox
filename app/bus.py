@@ -16,6 +16,9 @@ QUEUE_MAX = 200
 # Per-message ceiling for the replay copy: the model's deliberations run to
 # thousands of characters and a late visitor does not need every word.
 REPLAY_TEXT_MAX = 2000
+# Screenshots are far heavier than text, and the replay ring is held in memory
+# and re-sent to every new visitor - so only the newest few are kept.
+IMAGE_REPLAY_MAX = 2
 
 _subscribers: set = set()
 _replay: deque = deque(maxlen=REPLAY_MAX)
@@ -49,6 +52,16 @@ def _remember(env):
                         :REPLAY_TEXT_MAX
                     ]
                 return
+        return
+
+    if etype == "image":
+        _replay.append(dict(env))
+        stale = [e for e in _replay if e.get("type") == "image"][:-IMAGE_REPLAY_MAX]
+        for old_img in stale:
+            try:
+                _replay.remove(old_img)
+            except ValueError:
+                pass
         return
 
     if etype in ("prompt", "message", "tool", "status", "error", "reload"):

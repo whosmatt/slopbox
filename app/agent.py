@@ -46,6 +46,8 @@ THE PAGE (fixed HTML you cannot change - style it, do not expect to alter it):
     #qb-footer        with #qb-links and its <a> elements
   Chat messages are  #chat .msg  with .msg.user / .msg.assistant / .msg.system,
                      each containing .msg-role and .msg-text.
+  .msg.shot          holds img.msg-shot - a screenshot of your own candidate,
+                     shown to the visitor. Keep it visible and sensibly sized.
   .msg.thinking      is a <details>: <summary> holds .msg-role and .msg-peek
                      (a one-line preview), and .msg-text holds the full text,
                      shown only when open. Keep the summary clickable.
@@ -73,9 +75,17 @@ its readability; the live page shows real ones.
 
 WORKFLOW: write_css -> screenshot -> fix what looks wrong -> publish -> finish.
 Write a COMPLETE stylesheet every time; it replaces the previous one entirely.
+Keep it compact - a few thousand characters is plenty for a striking look, and an
+over-long one gets truncated mid-call and thrown away.
 Be bold and commit to the visitor's aesthetic - this site is meant to be fun.
 Keep your visible commentary to one or two short sentences per turn; the
 visitor sees it live. When publish succeeds, call finish immediately."""
+
+# Roughly 3.5 characters per token, with headroom for reasoning and the JSON
+# envelope. Advertising the 100KB sanitiser cap instead invites a stylesheet
+# that cannot fit in one response and gets cut off mid-string - which used to
+# poison the whole run.
+SAFE_CSS_CHARS = max(4000, int(MAX_TOKENS * 2.2))
 
 TOOLS = [
     {
@@ -99,7 +109,11 @@ TOOLS = [
                 "properties": {
                     "css": {
                         "type": "string",
-                        "description": "The complete stylesheet. Max %d bytes." % MAX_CSS_BYTES,
+                        "description": (
+                            "The complete stylesheet. Aim for 3000-10000 characters; "
+                            "past about %d it will be cut off mid-call and wasted. "
+                            "Hard limit %d bytes." % (SAFE_CSS_CHARS, MAX_CSS_BYTES)
+                        ),
                     }
                 },
                 "required": ["css"],
@@ -162,8 +176,70 @@ TOOLS = [
 IMAGE_PLACEHOLDER = "[earlier screenshot dropped to save context]"
 
 
+def prepare_tool_calls(tool_calls, truncated=False):
+    """Split streamed tool calls into what may enter the transcript, and what to
+    dispatch.
+
+    Arguments that do not parse must NEVER be stored: the transcript is resent
+    on every subsequent request, and the server parses tool-call arguments when
+    applying its chat template. One malformed string therefore 400s the whole
+    rest of the run, not just the step that produced it. A cut-off `write_css`
+    is the usual cause - the model runs out of output budget mid-CSS, leaving
+    something like '{"css": "body{color:red' behind.
+    """
+    outgoing, prepared = [], []
+    for tc in tool_calls:
+        raw = tc.get("arguments") or "{}"
+        args, error = None, None
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                args = loaded
+            else:
+                error = "Tool arguments must be a JSON object. Call the tool again."
+        except json.JSONDecodeError as exc:
+            if truncated:
+                error = (
+                    "Your tool call was CUT OFF before it finished - you exceeded the "
+                    "output budget, almost certainly with an over-long stylesheet "
+                    "(%d characters were sent). Nothing was applied. Write a much more "
+                    "compact stylesheet and call write_css again." % len(raw)
+                )
+            else:
+                error = (
+                    "Your tool arguments were not valid JSON (%s). Nothing was applied. "
+                    "Call the tool again with a complete, valid argument object."
+                    % str(exc)[:80]
+                )
+
+        outgoing.append(
+            {
+                "id": tc["id"],
+                "type": "function",
+                "function": {
+                    "name": tc["name"],
+                    # Substituted, so the transcript always stays parseable.
+                    "arguments": raw if args is not None else "{}",
+                },
+            }
+        )
+        prepared.append(
+            {"id": tc["id"], "name": tc["name"], "args": args or {}, "error": error}
+        )
+    return outgoing, prepared
+
+
 def _b64_image(data):
     return "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+
+
+def _publish_shot(report, label):
+    """Send the desktop render to the chat log, so the visitor sees what the
+    model sees. Desktop only - the mobile shot would double the payload for
+    little gain, and these go out to every connected browser."""
+    shot = report.shots.get("desktop")
+    if shot:
+        bus.publish({"type": "image", "label": label, "src": _b64_image(shot)})
 
 
 def _approx_chars(messages):
@@ -187,15 +263,43 @@ def _approx_chars(messages):
 class Run:
     """One agent run, servicing one or more visitor prompts."""
 
-    def __init__(self, prompt):
+    def __init__(self, prompt, prior=None):
         self.prompt = prompt
-        self.messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": "Visitor request: " + prompt},
-        ]
+        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # Each run starts with a clean context, so without this a follow-up like
+        # "try again" would arrive with nothing to refer to.
+        if prior:
+            self.messages.append({"role": "user", "content": prior})
+        self.messages.append({"role": "user", "content": "Visitor request: " + prompt})
+
         self.published = False
+        self.version = None
         self.steering: list = []
         self.compactions = 0
+        self.last_failure: list = []
+        self.exhausted = False
+        self.last_finish_reason = None
+        # Cleared once the loop can no longer consume steering, so late prompts
+        # are queued as their own job instead of vanishing into a finished run.
+        self.accepting_steering = True
+
+    def outcome(self):
+        """A short note for the next run, so follow-up prompts make sense."""
+        asked = self.prompt[:200]
+        if self.published:
+            what = "you published it successfully as version %s" % self.version
+        elif self.last_failure:
+            what = ("your stylesheet was REJECTED by validation and never went live. "
+                    "Reasons: " + "; ".join(self.last_failure[:3])[:300])
+        elif self.exhausted:
+            what = "you ran out of steps and published nothing, so the site is unchanged"
+        else:
+            what = "the attempt ended without publishing anything"
+        return (
+            "[Context from the attempt immediately before this one, in case the visitor "
+            "refers to it: they asked for %r and %s. None of that stylesheet is in your "
+            "context any more, so write a COMPLETE stylesheet from scratch.]" % (asked, what)
+        )
 
     # -- context hygiene -------------------------------------------------
     def _strip_old_images(self):
@@ -279,6 +383,7 @@ class Run:
         report = await POOL.inspect(self_url() + "/preview", screenshot_only=True, viewports=vps)
         if not report.shots:
             return "Screenshot failed: " + ("; ".join(report.problems) or "unknown error"), None
+        _publish_shot(report, "candidate")
         parts = [
             {
                 "type": "text",
@@ -297,6 +402,8 @@ class Run:
             return "No candidate stylesheet to publish - call write_css first.", None
         report = await POOL.inspect(self_url() + "/preview")
         if not report.ok:
+            self.last_failure = list(report.problems)
+            _publish_shot(report, "rejected")
             bus.publish({"type": "status", "text": "validation failed, not published"})
             parts = None
             if report.shots:
@@ -318,6 +425,7 @@ class Run:
 
         version = store.publish_candidate(self.prompt)
         self.published = True
+        self.version = version
         bus.publish({"type": "reload", "version": version})
         bus.publish({"type": "status", "text": "published v%d" % version})
         return (
@@ -351,6 +459,9 @@ class Run:
         bus.publish({"type": "status", "text": "thinking", "busy": True})
         try:
             for step in range(MAX_STEPS):
+                # Steering is consumed at the top of an iteration, so during the
+                # last one there is no next iteration to consume it.
+                self.accepting_steering = step < MAX_STEPS - 1
                 if self.steering:
                     extra = self.steering[:]
                     self.steering.clear()
@@ -376,53 +487,42 @@ class Run:
                     # Model chose to answer in prose; treat as end of turn.
                     return text.strip()
 
+                outgoing, prepared = prepare_tool_calls(
+                    tool_calls, truncated=self.last_finish_reason == "length"
+                )
                 self.messages.append(
                     {
                         "role": "assistant",
                         "content": text or None,
-                        "tool_calls": [
-                            {
-                                "id": tc["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": tc["name"],
-                                    "arguments": tc["arguments"] or "{}",
-                                },
-                            }
-                            for tc in tool_calls
-                        ],
+                        "tool_calls": outgoing,
                     }
                 )
 
                 finished = None
-                for tc in tool_calls:
-                    try:
-                        args = json.loads(tc["arguments"] or "{}")
-                        if not isinstance(args, dict):
-                            args = {}
-                    except json.JSONDecodeError:
-                        args = {}
+                for call in prepared:
+                    if call["error"]:
+                        bus.publish({"type": "status", "text": "retrying a bad tool call"})
                         self.messages.append(
                             {
                                 "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "content": "Your tool arguments were not valid JSON. Retry.",
+                                "tool_call_id": call["id"],
+                                "content": call["error"],
                             }
                         )
                         continue
 
-                    bus.publish({"type": "tool", "name": tc["name"]})
-                    result, extra_parts = await self._dispatch(tc["name"], args)
+                    bus.publish({"type": "tool", "name": call["name"]})
+                    result, extra_parts = await self._dispatch(call["name"], call["args"])
 
                     if isinstance(result, str) and result.startswith("__FINISH__"):
                         finished = result[len("__FINISH__") :]
                         self.messages.append(
-                            {"role": "tool", "tool_call_id": tc["id"], "content": "ok"}
+                            {"role": "tool", "tool_call_id": call["id"], "content": "ok"}
                         )
                         continue
 
                     self.messages.append(
-                        {"role": "tool", "tool_call_id": tc["id"], "content": result}
+                        {"role": "tool", "tool_call_id": call["id"], "content": result}
                     )
                     if extra_parts:
                         self.messages.append({"role": "user", "content": extra_parts})
@@ -430,10 +530,12 @@ class Run:
                 if finished is not None:
                     return finished
 
+            self.exhausted = True
             return "I ran out of steps on that one." + (
-                "" if self.published else " The site is unchanged."
+                "" if self.published else " The site is unchanged - ask again to retry."
             )
         finally:
+            self.accepting_steering = False
             store.clear_candidate()
             bus.publish({"type": "status", "text": "idle", "busy": False})
 
@@ -510,6 +612,8 @@ class Run:
                 continue
             slot["id"] = slot["id"] or ("call_%s_%d" % (msg_id, i))
             tool_calls.append(slot)
+
+        self.last_finish_reason = finish_reason
 
         if finish_reason == "length" and not tool_calls:
             # It thought itself out of budget. Nudge it towards acting.

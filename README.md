@@ -179,13 +179,28 @@ The tests are mounted into the container rather than baked into the image.
 
 ```bash
 docker compose exec slopbox python -m tests.test_guard      # sanitiser, 39 cases
+docker compose exec slopbox python -m tests.test_steering   # queue/context, 12 cases
 docker compose exec slopbox python -m tests.test_validator  # browser gate, 20 cases
 ```
 
 `test_guard` fires the CSS attack payloads that matter - `@import`,
 protocol-relative and `javascript:` URLs, SVG and font data URIs,
 `expression()`, `-moz-element()`, guard-selector tampering - and asserts that
-genuinely wild-but-fine stylesheets still pass. `test_validator` publishes sixteen
+genuinely wild-but-fine stylesheets still pass. `test_steering` also covers a sharp edge in the tool loop: arguments that do not
+parse must never enter the transcript. The transcript is resent on every request
+and the server parses tool-call arguments when applying its chat template, so one
+truncated `write_css` - the model running out of output budget mid-CSS, leaving
+`{"css": "body{color:red` behind - used to make every later request in that run
+fail with a 400. It is now replaced with `{}` and the model is told it was cut
+off, so the run recovers. The advertised CSS size budget is derived from
+`MAX_TOKENS` for the same reason: advertising the 100KB sanitiser cap invited a
+stylesheet that could not fit in one response.
+
+`test_steering` covers the queue: that a prompt arriving too late to be consumed
+becomes its own job instead of being silently dropped, and that a follow-up run
+is told what the previous attempt did so "try again" has a referent.
+
+`test_validator` publishes sixteen
 different ways of breaking the page (input hidden, zero-size, off-screen,
 transparent, covered, invisible text, blurred, animated off-screen, `body`
 hidden, chat log hidden, collapsed, transparent or unreadable) and asserts the

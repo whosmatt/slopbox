@@ -61,6 +61,18 @@ body.qb-body {
   overflow-y: auto;
   padding: 4px 2px;
   font-size: 14px;
+  /* Scrollable, but without a visible bar or a gutter that steals width.
+     app.js keeps the log pinned to the newest message unless the visitor has
+     scrolled up, which is the only cue needed. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  overscroll-behavior: contain;
+}
+
+#chat::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 #chat:empty { display: none; }
@@ -142,6 +154,24 @@ body.qb-body {
   border-top: 1px solid #eeeeee;
   padding-top: 8px;
 }
+/* Screenshots of the candidate stylesheet, as the model sees it. */
+.msg.shot { padding: 6px 6px 4px; }
+
+.msg-shot {
+  display: block;
+  /* Sized by aspect ratio, not stretched: width:100% plus object-fit would
+     letterbox the frame with bars in whatever colour sits behind it. Capped in
+     height so one screenshot cannot fill the log and scroll its own label away. */
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 26vh;
+  margin: 4px auto 0;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
 .msg.system { background: #f7f7f7; color: #555555; }
 .msg.error { background: #fff4f4; border-color: #f0c9c9; color: #8a1f1f; }
 

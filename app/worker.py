@@ -20,6 +20,9 @@ class Orchestrator:
     def __init__(self):
         self.pending: deque = deque()
         self.active = None
+        # Note from the previous run, handed to the next one so a follow-up like
+        # "try again" is not addressed to a model with no memory of it.
+        self.prior = None
         self._task = None
         self._wake = asyncio.Event()
 
@@ -37,7 +40,14 @@ class Orchestrator:
         if not prompt:
             return False, "Say something first."
 
-        if self.active is not None and len(self.active.steering) < MAX_STEERING:
+        # Only steer a run that still has an iteration left to read it in.
+        # Otherwise the prompt would be accepted, never consumed, and dropped
+        # when the run ended - while the visitor was told it had been added.
+        if (
+            self.active is not None
+            and self.active.accepting_steering
+            and len(self.active.steering) < MAX_STEERING
+        ):
             self.active.add_steering(prompt)
             bus.publish({"type": "prompt", "text": prompt, "steering": True})
             return True, "Added to the running agent's list."
@@ -75,10 +85,18 @@ class Orchestrator:
                 continue
 
             prompt = self.pending.popleft()
-            run = Run(prompt)
+            run = Run(prompt, prior=self.prior)
             self.active = run
             try:
                 summary = await run.execute()
+                self.prior = run.outcome()
+                # Anything steered in too late to be consumed becomes its own
+                # job rather than disappearing.
+                if run.steering:
+                    for late in reversed(run.steering):
+                        self.pending.appendleft(late)
+                    run.steering.clear()
+                    self._wake.set()
                 if summary:
                     bus.publish({"type": "message", "role": "system", "text": summary})
             except asyncio.CancelledError:

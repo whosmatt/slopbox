@@ -17,7 +17,7 @@ on:
 
 jobs:
   test:
-    name: CSS sanitiser tests
+    name: Unit tests
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repo
@@ -33,8 +33,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run sanitiser test suite
+      - name: CSS sanitiser suite
         run: python -m tests.test_guard
+
+      - name: Queue and context suite
+        run: python -m tests.test_steering
 
   push_to_registry:
     name: Push Docker image to Docker Hub

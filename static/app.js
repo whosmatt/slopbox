@@ -38,7 +38,7 @@
     return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 60;
   }
 
-  function addMessage(role, text, mid) {
+  function addMessage(role, text, mid, steering) {
     var stick = atBottom();
     var body = document.createElement('span');
     body.className = 'msg-text';
@@ -65,10 +65,13 @@
       if (mid) peeks[mid] = peek;
     } else {
       wrap = document.createElement('div');
-      wrap.className = 'msg ' + role;
+      wrap.className = 'msg ' + role + (steering ? ' steering' : '');
       var label = document.createElement('span');
       label.className = 'msg-role';
-      label.textContent = role === 'assistant' ? 'slopbox' : role;
+      /* Marked in the role line rather than appended to the text, so the
+         message body stays exactly what the visitor typed. */
+      label.textContent = (role === 'assistant' ? 'slopbox' : role) +
+        (steering ? ' (steering)' : '');
       wrap.appendChild(label);
       wrap.appendChild(body);
     }
@@ -78,6 +81,33 @@
     if (stick) chat.scrollTop = chat.scrollHeight;
     if (mid) bubbles[mid] = body;
     return body;
+  }
+
+  /* The model is multimodal and looks at a render of its own candidate before
+     publishing; showing the same frame here is the visitor's view of that. */
+  function addImage(src, label) {
+    if (!src) return;
+    var stick = atBottom();
+    var wrap = document.createElement('div');
+    wrap.className = 'msg shot';
+    var role = document.createElement('span');
+    role.className = 'msg-role';
+    role.textContent = label === 'rejected' ? 'rejected render' : 'what it sees';
+    var img = document.createElement('img');
+    img.className = 'msg-shot';
+    img.alt = 'Screenshot of the candidate stylesheet';
+    img.loading = 'lazy';
+    /* Height is unknown until the image decodes, so keep the log pinned to the
+       bottom once it does - otherwise it jumps away from the newest message. */
+    img.addEventListener('load', function () {
+      if (stick) chat.scrollTop = chat.scrollHeight;
+    });
+    img.src = src;
+    wrap.appendChild(role);
+    wrap.appendChild(img);
+    chat.appendChild(wrap);
+    trim();
+    if (stick) chat.scrollTop = chat.scrollHeight;
   }
 
   function appendDelta(mid, text) {
@@ -125,13 +155,16 @@
         setStatus(ev.busy ? 'working…' : 'ready');
         break;
       case 'prompt':
-        addMessage('user', ev.text + (ev.steering ? '  (added to the running job)' : ''));
+        addMessage('user', ev.text, null, ev.steering);
         break;
       case 'message':
         addMessage(ev.role || 'system', ev.text || '', ev.mid);
         break;
       case 'delta':
         appendDelta(ev.mid, ev.text || '');
+        break;
+      case 'image':
+        addImage(ev.src, ev.label);
         break;
       case 'tool':
         setStatus({
