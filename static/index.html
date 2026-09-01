@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en" data-mode="{{MODE}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>slopbox</title>
+<!-- base.css is immutable and always loads first; the agent's stylesheet
+     loads after it and may override anything here. -->
+<link rel="stylesheet" href="/base.css">
+<!--CUSTOM_STYLE-->
+</head>
+<body class="qb-body">
+<div id="qb-root">
+  <header id="qb-header">
+    <h1 id="qb-title">slopbox</h1>
+    <p id="qb-tagline">Ask an incompetent AI agent to restyle this page.</p>
+  </header>
+
+  <main id="qb-main">
+    <div id="chat" role="log" aria-live="polite" aria-label="Agent progress"></div>
+
+    <form id="prompt-form" autocomplete="off">
+      <input id="prompt-input" name="prompt" type="text" maxlength="600"
+             placeholder="wacky and whimsy crooked lines in strong contrasty colors&hellip;"
+             aria-label="How should this page look?">
+      <button id="prompt-submit" type="submit">restyle</button>
+    </form>
+    <p id="qb-hint"><span id="qb-status">ready</span></p>
+  </main>
+
+  <footer id="qb-footer">
+    <p id="qb-links">
+      <a href="/?safe=1" id="qb-safe-link">view default style</a>
+      <span id="qb-note">Qwen3.6-35B-A3B-FP8 with very limited tool calls that should probably be secure enough but i am monitoring the container anyways in case anyone installs fun new software</span>
+    </p>
+  </footer>
+</div>
+<script src="/guard.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

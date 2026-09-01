@@ -1,0 +1,211 @@
+/* slopbox client - immutable.
+ * Streams the agent's progress into #chat, submits prompts, and hot-swaps the
+ * stylesheet when a new version goes live (no reload, so the chat log survives).
+ */
+(function () {
+  'use strict';
+
+  var MAX_MESSAGES = 40;
+
+  var chat = document.getElementById('chat');
+  var form = document.getElementById('prompt-form');
+  var input = document.getElementById('prompt-input');
+  var button = document.getElementById('prompt-submit');
+  var status = document.getElementById('qb-status');
+
+  var bubbles = {};   // mid -> .msg-text node
+  var peeks = {};     // mid -> .msg-peek node, for collapsed thinking messages
+  var seen = {};      // event id -> true, so replayed events are not duplicated
+
+  var PEEK_CHARS = 80;
+
+  function peekText(full) {
+    var flat = full.replace(/\s+/g, ' ').trim();
+    return flat.length > PEEK_CHARS ? '…' + flat.slice(-PEEK_CHARS) : flat;
+  }
+
+  function trim() {
+    while (chat.children.length > MAX_MESSAGES) {
+      var gone = chat.firstElementChild;
+      for (var k in bubbles) {
+        if (bubbles[k] && !bubbles[k].isConnected) { delete bubbles[k]; delete peeks[k]; }
+      }
+      chat.removeChild(gone);
+    }
+  }
+
+  function atBottom() {
+    return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 60;
+  }
+
+  function addMessage(role, text, mid) {
+    var stick = atBottom();
+    var body = document.createElement('span');
+    body.className = 'msg-text';
+    body.textContent = text || '';
+
+    var wrap;
+    if (role === 'thinking') {
+      /* The model's deliberation runs to thousands of characters, so it stays
+         folded away. The summary carries a live tail of the stream, which is
+         enough to see it working; click for the whole thing. */
+      wrap = document.createElement('details');
+      wrap.className = 'msg thinking';
+      var summary = document.createElement('summary');
+      var slabel = document.createElement('span');
+      slabel.className = 'msg-role';
+      slabel.textContent = 'thinking';
+      var peek = document.createElement('span');
+      peek.className = 'msg-peek';
+      peek.textContent = peekText(text || '');
+      summary.appendChild(slabel);
+      summary.appendChild(peek);
+      wrap.appendChild(summary);
+      wrap.appendChild(body);
+      if (mid) peeks[mid] = peek;
+    } else {
+      wrap = document.createElement('div');
+      wrap.className = 'msg ' + role;
+      var label = document.createElement('span');
+      label.className = 'msg-role';
+      label.textContent = role === 'assistant' ? 'slopbox' : role;
+      wrap.appendChild(label);
+      wrap.appendChild(body);
+    }
+
+    chat.appendChild(wrap);
+    trim();
+    if (stick) chat.scrollTop = chat.scrollHeight;
+    if (mid) bubbles[mid] = body;
+    return body;
+  }
+
+  function appendDelta(mid, text) {
+    var node = bubbles[mid];
+    if (!node || !node.isConnected) node = addMessage('assistant', '', mid);
+    var stick = atBottom();
+    node.textContent += text;
+    var peek = peeks[mid];
+    if (peek && peek.isConnected) peek.textContent = peekText(node.textContent);
+    if (stick) chat.scrollTop = chat.scrollHeight;
+  }
+
+  function setStatus(text) {
+    if (status) status.textContent = text;
+  }
+
+  function setBusy(busy) {
+    document.documentElement.setAttribute('data-busy', busy ? '1' : '0');
+    if (button) button.disabled = false; /* queuing while busy is allowed */
+  }
+
+  function restyle(version) {
+    var link = document.querySelector('link[data-qb-style]') ||
+      document.querySelector('link[href^="/style.css"]');
+    var fresh = document.createElement('link');
+    fresh.rel = 'stylesheet';
+    fresh.setAttribute('data-qb-style', '1');
+    fresh.href = '/style.css?v=' + (version || Date.now());
+    fresh.addEventListener('load', function () {
+      if (link && link !== fresh && link.parentNode) link.parentNode.removeChild(link);
+      window.dispatchEvent(new Event('slopbox:restyled'));
+    });
+    document.head.appendChild(fresh);
+  }
+
+  function handle(ev) {
+    if (ev.id) {
+      if (seen[ev.id]) return;
+      seen[ev.id] = true;
+    }
+    switch (ev.type) {
+      case 'hello':
+        (ev.replay || []).forEach(handle);
+        setBusy(!!ev.busy);
+        setStatus(ev.busy ? 'working…' : 'ready');
+        break;
+      case 'prompt':
+        addMessage('user', ev.text + (ev.steering ? '  (added to the running job)' : ''));
+        break;
+      case 'message':
+        addMessage(ev.role || 'system', ev.text || '', ev.mid);
+        break;
+      case 'delta':
+        appendDelta(ev.mid, ev.text || '');
+        break;
+      case 'tool':
+        setStatus({
+          get_current_css: 'reading the current stylesheet…',
+          write_css: 'writing CSS…',
+          screenshot: 'looking at the result…',
+          publish: 'validating in a real browser…',
+          finish: 'done'
+        }[ev.name] || (ev.name + '…'));
+        break;
+      case 'status':
+        if (typeof ev.busy === 'boolean') setBusy(ev.busy);
+        setStatus(ev.text || '');
+        break;
+      case 'reload':
+        restyle(ev.version);
+        setStatus('new look is live');
+        break;
+      case 'error':
+        addMessage('error', ev.text || 'Something went wrong.');
+        setBusy(false);
+        break;
+    }
+  }
+
+  function connect() {
+    var es = new EventSource('/events');
+    es.onmessage = function (e) {
+      try { handle(JSON.parse(e.data)); } catch (err) { /* ignore */ }
+    };
+    es.onerror = function () {
+      setStatus('reconnecting…');
+      /* EventSource retries on its own; nothing to do. */
+    };
+  }
+
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var text = (input.value || '').trim();
+    if (!text) return;
+    setStatus('sending…');
+    fetch('/api/prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: text })
+    }).then(function (r) { return r.json().catch(function () { return {}; }); })
+      .then(function (d) {
+        if (d && d.ok) {
+          input.value = '';
+          setStatus(d.message || 'queued');
+        } else {
+          setStatus((d && (d.error || d.message)) || 'that did not go through');
+        }
+      })
+      .catch(function () { setStatus('network error'); });
+  });
+
+  /* Mark the server-rendered stylesheet link so hot-swaps can replace it. */
+  var initial = document.querySelector('link[href^="/style.css"]');
+  if (initial) initial.setAttribute('data-qb-style', '1');
+
+  /* The validator renders /preview to judge a candidate stylesheet. Populate the
+     chat log with representative messages there instead of connecting to the
+     live stream: it makes the readability checks deterministic, and it means the
+     model's own screenshots show what the chat will actually look like. */
+  if (document.documentElement.getAttribute('data-mode') === 'preview') {
+    addMessage('user', 'make it look like a haunted library at midnight');
+    addMessage('thinking', 'The visitor wants something gothic and dim. Deep ' +
+      'browns, candlelight amber, a serif face, and a slow flicker on the ' +
+      'headings. The prompt box needs to stay legible against all of it.');
+    addMessage('assistant', 'Dimming the lights and lighting the candles.');
+    addMessage('system', 'Published. The new look is live.');
+    return;
+  }
+
+  connect();
+})();

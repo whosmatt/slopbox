@@ -1,0 +1,30 @@
+services:
+  slopbox:
+    build: .
+    image: slopbox:latest
+    container_name: slopbox
+    init: true
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      # Test suite, mounted read-only; not part of the image.
+      - ./tests:/app/tests:ro
+      # The only writable path. Bounded by design: three fixed files plus a
+      # capped history ring, so it cannot fill up over time.
+      - slopbox-data:/data
+    tmpfs:
+      # Chromium's scratch space, wiped on every restart.
+      - /tmp:size=256m
+    # Chromium is memory-hungry; cap it so a runaway render cannot take the host.
+    mem_limit: 2g
+    shm_size: 512m
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  slopbox-data:

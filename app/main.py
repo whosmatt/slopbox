@@ -1,0 +1,283 @@
+"""FastAPI entrypoint.
+
+Routes are deliberately few. The only mutable artefact in the whole service is
+the stylesheet at /style.css, and the only way to change it is a prompt that
+goes through the agent, the sanitiser and the browser validator.
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
+
+from . import bus, store
+from .config import (
+    ADMIN_TOKEN,
+    MAX_PROMPT_CHARS,
+    RATE_LIMIT_COUNT,
+    RATE_LIMIT_WINDOW_SEC,
+    STATIC_DIR,
+    TRUSTED_PROXIES,
+    note_server_port,
+)
+from .validator import POOL
+from .worker import ORCHESTRATOR
+
+_hits = defaultdict(deque)
+
+
+LOCAL_PEERS = ("127.0.0.1", "::1", "localhost", "testclient")
+
+
+def _peer_ip(request: Request):
+    """The actual TCP peer. Cannot be forged by a header."""
+    return request.client.host if request.client else "unknown"
+
+
+def _client_ip(request: Request):
+    """Caller identity for rate limiting.
+
+    X-Forwarded-For is only believed when the connection genuinely comes from a
+    configured proxy - otherwise anyone could mint a fresh identity per request
+    and walk straight through the rate limiter.
+    """
+    peer = _peer_ip(request)
+    if peer in TRUSTED_PROXIES:
+        fwd = request.headers.get("x-forwarded-for")
+        if fwd:
+            return fwd.split(",")[0].strip()
+    return peer
+
+
+def _require_local(request: Request):
+    """Internal-only routes. Judged on the peer address, never on a header."""
+    if _peer_ip(request) not in LOCAL_PEERS:
+        raise HTTPException(status_code=403, detail="local only")
+
+
+def _rate_limited(ip):
+    now = time.time()
+    q = _hits[ip]
+    while q and now - q[0] > RATE_LIMIT_WINDOW_SEC:
+        q.popleft()
+    if len(q) >= RATE_LIMIT_COUNT:
+        return int(RATE_LIMIT_WINDOW_SEC - (now - q[0])) + 1
+    q.append(now)
+    # Keep the table from growing unbounded across many IPs.
+    if len(_hits) > 5000:
+        for k in [k for k, v in list(_hits.items())[:1000] if not v]:
+            _hits.pop(k, None)
+    return 0
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    store.init()
+    await POOL.start()
+    ORCHESTRATOR.start()
+    try:
+        yield
+    finally:
+        await ORCHESTRATOR.stop()
+        await POOL.stop()
+
+
+app = FastAPI(title="slopbox", lifespan=lifespan, docs_url=None, redoc_url=None)
+
+NOSNIFF = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+}
+
+# Third layer, after the sanitiser and the validator: the browser itself refuses
+# any outbound request the stylesheet might attempt. 'unsafe-inline' for styles
+# is intentional - the guard overlay styles its own shadow root, and inline style
+# permission grants no network reach, which is what this header exists to deny.
+CSP = (
+    "default-src 'none'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "form-action 'none'; "
+    "base-uri 'none'; "
+    "frame-ancestors 'none'"
+)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    # scope["server"] is the socket uvicorn bound, not anything the client sent,
+    # so it is safe to learn our own address from it.
+    server = request.scope.get("server")
+    if server:
+        note_server_port(server[1])
+    response = await call_next(request)
+    for k, v in NOSNIFF.items():
+        response.headers.setdefault(k, v)
+    if request.url.path in ("/", "/preview"):
+        response.headers["Content-Security-Policy"] = CSP
+    return response
+
+
+def _page(safe_mode, preview):
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    if safe_mode:
+        sheet = ""
+        mode = "safe"
+    elif preview:
+        sheet = '<link rel="stylesheet" href="/candidate.css">'
+        mode = "preview"
+    else:
+        v = store.read_meta().get("version", 0)
+        sheet = '<link rel="stylesheet" href="/style.css?v=%s">' % v
+        mode = "live"
+    return html.replace("<!--CUSTOM_STYLE-->", sheet).replace("{{MODE}}", mode)
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    safe = request.query_params.get("safe") in ("1", "true", "yes")
+    return HTMLResponse(_page(safe_mode=safe, preview=False))
+
+
+@app.get("/preview", response_class=HTMLResponse)
+async def preview(request: Request):
+    """Internal: the candidate stylesheet, for the validator and screenshots."""
+    _require_local(request)
+    return HTMLResponse(_page(safe_mode=False, preview=True))
+
+
+@app.get("/style.css")
+async def style_css():
+    return Response(
+        content=store.current_css(),
+        media_type="text/css",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/candidate.css")
+async def candidate_css(request: Request):
+    _require_local(request)
+    return Response(
+        content=store.candidate_css(),
+        media_type="text/css",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/base.css")
+async def base_css():
+    return FileResponse(STATIC_DIR / "base.css", media_type="text/css")
+
+
+@app.get("/guard.js")
+async def guard_js():
+    return FileResponse(STATIC_DIR / "guard.js", media_type="application/javascript")
+
+
+@app.get("/app.js")
+async def app_js():
+    return FileResponse(STATIC_DIR / "app.js", media_type="application/javascript")
+
+
+@app.post("/api/prompt")
+async def api_prompt(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="expected JSON")
+
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt required")
+    prompt = prompt.strip()[:MAX_PROMPT_CHARS]
+
+    wait = _rate_limited(_client_ip(request))
+    if wait:
+        return JSONResponse(
+            {"ok": False, "error": "Slow down - try again in %ds." % wait}, status_code=429
+        )
+
+    ok, message = ORCHESTRATOR.submit(prompt)
+    return JSONResponse({"ok": ok, "message": message, **ORCHESTRATOR.status()})
+
+
+@app.get("/api/status")
+async def api_status():
+    meta = store.read_meta()
+    return {
+        **ORCHESTRATOR.status(),
+        "last_prompt": meta.get("prompt", ""),
+        "updated": meta.get("updated", 0),
+        "viewers": bus.subscriber_count(),
+    }
+
+
+@app.get("/events")
+async def events(request: Request):
+    async def gen():
+        with bus.Subscription() as queue:
+            yield bus.sse({"type": "hello", "replay": bus.replay(), **ORCHESTRATOR.status()})
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=20)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield bus.sse(event)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.get("/healthz", response_class=PlainTextResponse)
+async def healthz():
+    return "ok"
+
+
+def _require_admin(token):
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+
+@app.post("/admin/reset")
+async def admin_reset(x_admin_token: str = Header(default="")):
+    _require_admin(x_admin_token)
+    version = store.reset()
+    bus.clear_replay()
+    bus.publish({"type": "reload", "version": version})
+    bus.publish({"type": "message", "role": "system", "text": "Styles reset to default."})
+    return {"ok": True, "version": version}
+
+
+@app.post("/admin/rollback")
+async def admin_rollback(x_admin_token: str = Header(default="")):
+    _require_admin(x_admin_token)
+    version = store.rollback()
+    bus.publish({"type": "reload", "version": version})
+    bus.publish({"type": "message", "role": "system", "text": "Rolled back to the previous look."})
+    return {"ok": True, "version": version}
