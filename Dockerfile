@@ -1,6 +1,6 @@
 # Playwright's own image: Chromium and its system libraries are already present
 # and version-matched to the pip package, which is the fiddly part otherwise.
-FROM mcr.microsoft.com/playwright/python:v1.49.1-jammy
+FROM mcr.microsoft.com/playwright/python:v1.62.0-jammy
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
