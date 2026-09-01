@@ -11,7 +11,7 @@ Run with: python -m tests.test_steering
 import json
 import sys
 
-from app.agent import Run, prepare_tool_calls
+from app.agent import STALE_IMAGE, Run, prepare_tool_calls, step_nudge
 from app.worker import Orchestrator
 
 
@@ -118,6 +118,41 @@ def main():
         [{"id": "c4", "name": "publish", "arguments": ""}])
     results.append(check("empty arguments treated as {}",
                          prepared[0]["error"] is None and prepared[0]["args"] == {}))
+
+    print()
+    print("a screenshot stops representing the candidate once it is rewritten:")
+    # Left in place, an early render sits in context under its original caption
+    # while later rewrites pile up. The model then decides its change "still is
+    # not showing up", rewrites again, and burns the whole step budget.
+    r = Run("make it gold")
+    r.messages.append({"role": "user", "content": [
+        {"type": "text", "text": "desktop view:"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}}]})
+    r._invalidate_screenshots()
+    body = r.messages[-1]["content"]
+    results.append(check("image replaced after a rewrite",
+                         not any(p.get("type") == "image_url" for p in body)))
+    results.append(check("replacement says why and what to do",
+                         body[0]["text"] == STALE_IMAGE and "screenshot again" in STALE_IMAGE))
+    results.append(check("text-only messages untouched",
+                         r.messages[0]["role"] == "system"
+                         and isinstance(r.messages[0]["content"], str)))
+
+    print()
+    print("the loop states the shrinking budget out loud:")
+    results.append(check("quiet early on", step_nudge(0, 14, 0, False, None)[0] is None))
+    results.append(check("quiet while revisions are few",
+                         step_nudge(1, 14, 2, False, None)[0] is None))
+    msg, marker = step_nudge(1, 14, 3, False, None)
+    results.append(check("nags after 3 blind revisions", msg is not None and marker == 3))
+    results.append(check("does not repeat for the same count",
+                         step_nudge(1, 14, 3, False, 3)[0] is None))
+    results.append(check("urges publishing near the limit",
+                         "publish now" in (step_nudge(11, 14, 5, False, 5)[0] or "")))
+    results.append(check("demands publishing on the last step",
+                         "LAST STEP" in (step_nudge(13, 14, 5, False, 5)[0] or "")))
+    results.append(check("silent once published",
+                         step_nudge(13, 14, 9, True, None)[0] is None))
 
     print()
     failed = results.count(False)

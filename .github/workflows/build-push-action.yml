@@ -39,6 +39,18 @@ jobs:
       - name: Queue and context suite
         run: python -m tests.test_steering
 
+      # Dependabot bumps the base image (docker) and the pip package in separate
+      # PRs and cannot see that they are one unit. Merging either alone ships an
+      # image whose browsers do not match its Playwright library - and no other
+      # check here would notice, because the browser suite needs a live
+      # container and does not run in CI.
+      - name: Playwright pin must match the base image tag
+        run: |
+          img=$(grep -oP 'playwright/python:v\K[0-9.]+' Dockerfile)
+          pip=$(grep -oP '^playwright==\K[0-9.]+' requirements.txt)
+          echo "base image: $img / pip: $pip"
+          test "$img" = "$pip" || { echo "::error::Playwright version mismatch"; exit 1; }
+
   push_to_registry:
     name: Push Docker image to Docker Hub
     needs: test
