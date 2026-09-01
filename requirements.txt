@@ -1,6 +1,9 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-openai==1.59.6
-playwright==1.49.1
-tinycss2==1.4.0
-python-dotenv==1.0.1
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+openai==3.6.0
+# Must stay equal to the Playwright base image tag in the Dockerfile: the pip
+# package looks for a browser build of its own revision, and the image ships
+# browsers for its tag. A mismatch fails at startup, not at build time.
+playwright==1.62.0
+tinycss2==1.5.1
+python-dotenv==1.2.3

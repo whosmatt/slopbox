@@ -73,6 +73,19 @@ HARD RULES, enforced by machine - violating them wastes your turns:
 The screenshots show the chat log filled with sample messages so you can judge
 its readability; the live page shows real ones.
 
+WHEN TO STOP FIDDLING - your steps are limited, and running out publishes
+NOTHING, which is the worst outcome available to you:
+  * Publish as soon as the page looks decent. Publishing is not final - the
+    visitor can ask again, and you may keep improving after it is live. A
+    published good-enough look always beats an unpublished perfect one.
+  * Two attempts per detail, maximum. If it still is not right, DELETE that
+    detail and publish without it. Fighting one property is never worth a step.
+  * If the thing fighting you is something you invented rather than something
+    the visitor actually asked for, delete it immediately. Nobody is waiting
+    for it. Only the visitor's stated wish has to land.
+  * Never call write_css twice in a row without a screenshot or a publish in
+    between - rewriting blind burns your budget and tells you nothing.
+
 WORKFLOW: write_css -> screenshot -> fix what looks wrong -> publish -> finish.
 Write a COMPLETE stylesheet every time; it replaces the previous one entirely.
 Keep it compact - a few thousand characters is plenty for a striking look, and an
@@ -86,6 +99,10 @@ visitor sees it live. When publish succeeds, call finish immediately."""
 # that cannot fit in one response and gets cut off mid-string - which used to
 # poison the whole run.
 SAFE_CSS_CHARS = max(4000, int(MAX_TOKENS * 2.2))
+
+SYSTEM_PROMPT = SYSTEM_PROMPT + """
+
+You have %d steps in this turn, no more.""" % MAX_STEPS
 
 TOOLS = [
     {
@@ -174,6 +191,46 @@ TOOLS = [
 ]
 
 IMAGE_PLACEHOLDER = "[earlier screenshot dropped to save context]"
+STALE_IMAGE = (
+    "[screenshot removed: it showed an EARLIER draft and no longer reflects the "
+    "current candidate. Call screenshot again to see what you have now.]"
+)
+
+
+def step_nudge(step, max_steps, writes, published, last_nudge_writes):
+    """Escalating reminder for a model that keeps revising and never ships.
+
+    Prose in the system prompt is easy for a small model to drift away from over
+    a long run, so the loop states the shrinking budget out loud as well.
+    Returns (message, marker); the marker is stored so the same nudge is not
+    repeated for the same number of revisions.
+    """
+    remaining = max_steps - step
+    if published:
+        return None, last_nudge_writes
+
+    if remaining <= 1:
+        return (
+            "LAST STEP. Call publish right now with whatever you have. If you do "
+            "not, nothing reaches the visitor at all.",
+            last_nudge_writes,
+        )
+    if remaining <= 3:
+        return (
+            "Only %d steps left and nothing is live yet. Stop refining and call "
+            "publish now - imperfect and live beats perfect and unpublished."
+            % remaining,
+            last_nudge_writes,
+        )
+    if writes >= 3 and writes != last_nudge_writes:
+        return (
+            "You have rewritten the stylesheet %d times without publishing. If some "
+            "detail will not come together, delete that detail and publish what "
+            "works - especially if it is something you added yourself rather than "
+            "something the visitor asked for." % writes,
+            writes,
+        )
+    return None, last_nudge_writes
 
 
 def prepare_tool_calls(tool_calls, truncated=False):
@@ -279,6 +336,8 @@ class Run:
         self.last_failure: list = []
         self.exhausted = False
         self.last_finish_reason = None
+        self.writes = 0
+        self._last_nudge_writes = None
         # Cleared once the loop can no longer consume steering, so late prompts
         # are queued as their own job instead of vanishing into a finished run.
         self.accepting_steering = True
@@ -315,6 +374,19 @@ class Run:
                 seen_latest = True
                 continue
             m["content"] = [{"type": "text", "text": IMAGE_PLACEHOLDER}]
+
+    def _invalidate_screenshots(self):
+        """Drop screenshots once the stylesheet they showed has been replaced.
+
+        Without this, a render taken early keeps sitting in context under its
+        original present-tense caption while later rewrites pile up. The model
+        then reasons about a stale picture, concludes its change "still is not
+        showing up", rewrites again, and loops until the step budget is gone.
+        """
+        for m in self.messages:
+            if m.get("role") == "user" and isinstance(m.get("content"), list):
+                if any(p.get("type") == "image_url" for p in m["content"]):
+                    m["content"] = [{"type": "text", "text": STALE_IMAGE}]
 
     def _compact(self):
         """Collapse the middle of the transcript into a short note."""
@@ -363,10 +435,14 @@ class Run:
         if not result.ok:
             return "REJECTED by the sanitiser: " + result.message + "\nFix and call write_css again.", None
         store.set_candidate(result.css)
+        self.writes += 1
+        self._invalidate_screenshots()
         return (
-            "Candidate accepted (%d rules, %d declarations, %d bytes). Not live yet. "
-            "Call screenshot to see it, then publish."
+            "Candidate accepted as draft #%d (%d rules, %d declarations, %d bytes). Not "
+            "live yet, and any screenshot you took before this is now out of date. "
+            "Call screenshot to see THIS draft, then publish."
             % (
+                self.writes,
                 result.stats.get("rules", 0),
                 result.stats.get("declarations", 0),
                 len(result.css.encode("utf-8")),
@@ -387,9 +463,8 @@ class Run:
         parts = [
             {
                 "type": "text",
-                "text": "Candidate stylesheet rendered ("
-                + ", ".join(report.shots.keys())
-                + "). Judge it and fix anything broken.",
+                "text": "Render of draft #%d (%s), as it looks right now. Judge it "
+                "and fix anything broken." % (self.writes, ", ".join(report.shots.keys())),
             }
         ]
         for label, data in report.shots.items():
@@ -471,6 +546,13 @@ class Run:
                         )
                         self.prompt = (self.prompt + " + " + s)[:400]
 
+                nudge, marker = step_nudge(
+                    step, MAX_STEPS, self.writes, self.published, self._last_nudge_writes
+                )
+                if nudge:
+                    self._last_nudge_writes = marker
+                    self.messages.append({"role": "user", "content": nudge})
+
                 self._budget()
                 text, tool_calls = await self._stream_turn()
 
@@ -529,6 +611,19 @@ class Run:
 
                 if finished is not None:
                     return finished
+
+            # Out of steps with an unpublished candidate: publishing it is strictly
+            # better than discarding it. It already passed the sanitiser, and
+            # publish runs the full browser validation anyway, so this cannot
+            # ship a broken page.
+            if not self.published and store.has_candidate():
+                bus.publish({"type": "status", "text": "out of steps - publishing best draft"})
+                await self._tool_publish({})
+                if self.published:
+                    self.exhausted = True
+                    return (
+                        "I ran out of steps fiddling, so I published the closest draft I had."
+                    )
 
             self.exhausted = True
             return "I ran out of steps on that one." + (
