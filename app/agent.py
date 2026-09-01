@@ -32,7 +32,21 @@ from .config import (
 from .css_guard import sanitize
 from .validator import POOL
 
-client = AsyncOpenAI(api_key=QWEN_API_KEY, base_url=QWEN_BASE_URL, timeout=180.0)
+_client = None
+
+
+def get_client():
+    """Built on first use, never at import.
+
+    openai 3.x raises OpenAIError when no key is present, so constructing this at
+    module level made importing this module require credentials - which broke the
+    credential-free unit tests. Nothing here should need a secret just to be
+    imported and inspected.
+    """
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(api_key=QWEN_API_KEY, base_url=QWEN_BASE_URL, timeout=180.0)
+    return _client
 
 SYSTEM_PROMPT = """You are slopbox, the resident stylist of a website whose only
 job is to restyle itself on request. Visitors type a wish into a text box; you
@@ -636,7 +650,7 @@ class Run:
 
     async def _stream_turn(self):
         """One streamed completion. Returns (text, tool_calls)."""
-        stream = await client.chat.completions.create(
+        stream = await get_client().chat.completions.create(
             model=QWEN_MODEL,
             messages=self.messages,
             tools=TOOLS,

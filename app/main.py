@@ -24,6 +24,7 @@ from fastapi.responses import (
 from . import bus, store
 from .config import (
     ADMIN_TOKEN,
+    QWEN_API_KEY,
     MAX_PROMPT_CHARS,
     RATE_LIMIT_COUNT,
     RATE_LIMIT_WINDOW_SEC,
@@ -83,6 +84,10 @@ def _rate_limited(ip):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not QWEN_API_KEY:
+        # The client is built lazily, so this would otherwise only surface as a
+        # failed prompt. Say it plainly at boot instead.
+        print("WARNING: QWEN_API_KEY is empty - every prompt will fail.", flush=True)
     store.init()
     await POOL.start()
     ORCHESTRATOR.start()
