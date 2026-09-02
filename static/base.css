@@ -348,10 +348,63 @@ body.qb-body {
 #qb-sketch {
   display: block;
   width: 100%;
-  max-width: 620px;
-  height: 200px;
+  /* Roomy by default: a clipped canvas is the common failure, and the agent can
+     always shrink it. The frame's own document has overflow:hidden, so anything
+     larger than the box is simply cut off. */
+  max-width: 900px;
+  height: 420px;
   margin: 0 auto;
   border: 0;
   background: transparent;
+  /* Cannot steal clicks meant for the prompt box until the agent opts in with
+     pointer-events:auto - which the validator then checks. */
   pointer-events: none;
+}
+
+/* Alongside the chat: #qb-main becomes a row on a wide screen, so the frame and
+   the transcript sit side by side, and stacks again when there is no room. */
+#qb-main:has(> #qb-sketch.qb-sketch-main) {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Grid rather than flex-direction:row, which would put the prompt form and the
+   hint beside the chat as well and squeeze the transcript to nothing. Only the
+   frame and the chat share the row; everything else stays full width below. */
+@media (min-width: 900px) {
+  #qb-main:has(> #qb-sketch.qb-sketch-main.qb-sketch-beside) {
+    /* The column is 620px for a single readable measure of text; two panels
+       need more room, or "beside the chat" ends up narrower than "above" it. */
+    max-width: 1200px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 1fr);
+    grid-template-areas:
+      "sketch chat"
+      "form   form"
+      "hint   hint";
+    align-items: stretch;
+  }
+  #qb-main:has(> #qb-sketch.qb-sketch-beside) > #qb-sketch { grid-area: sketch; }
+  #qb-main:has(> #qb-sketch.qb-sketch-beside) > #chat { grid-area: chat; max-height: none; }
+  #qb-main:has(> #qb-sketch.qb-sketch-beside) > #prompt-form { grid-area: form; }
+  #qb-main:has(> #qb-sketch.qb-sketch-beside) > #qb-hint { grid-area: hint; }
+
+  #qb-sketch.qb-sketch-main.qb-sketch-beside {
+    width: 100%;
+    max-width: none;
+    height: auto;
+    min-height: 340px;
+  }
+}
+
+/* Behind everything, for full-bleed generative backdrops. */
+#qb-sketch.qb-sketch-bg {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  margin: 0;
+  z-index: -1;
 }

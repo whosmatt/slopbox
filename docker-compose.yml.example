@@ -18,7 +18,11 @@ services:
 
       # Agent limits. app/config.py carries the same defaults, so any line below
       # can simply be deleted rather than tuned.
-      MAX_STEPS: "14"
+      # Counted in steps rather than seconds on purpose: the inference endpoint's
+      # speed varies a lot, so a time limit would cut good work short whenever it
+      # happened to be slow. Running out publishes the best draft rather than
+      # discarding it.
+      MAX_STEPS: "24"
       REASONING_EFFORT: "low"
       MAX_TOKENS: "12000"
       MAX_CONTEXT_CHARS: "240000"

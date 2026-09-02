@@ -16,7 +16,10 @@ QWEN_MODEL = os.getenv("QWEN_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8")
 
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
-MAX_STEPS = int(os.getenv("MAX_STEPS", "14"))
+# Roomy on purpose: a design can now involve a stylesheet, markup and a
+# scripted sketch, and the original reason for a tight budget - runs looping
+# on a stale screenshot - was a bug that has since been fixed.
+MAX_STEPS = int(os.getenv("MAX_STEPS", "24"))
 # Qwen3.6 is a reasoning model and will happily spend thousands of tokens
 # deliberating. "low" keeps it deliberating usefully without stalling the UI.
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "low")

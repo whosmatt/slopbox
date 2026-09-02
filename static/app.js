@@ -161,6 +161,51 @@
     document.head.appendChild(fresh);
   }
 
+  /* Publishing changes more than the stylesheet: decoration and the sketch frame
+     are rendered into the HTML server-side, so before this they only appeared,
+     changed or vanished when the visitor reloaded. Pinned and safe pages keep
+     what they were served, exactly as they keep their stylesheet. */
+  function refreshParts(version) {
+    if (NO_RESTYLE) return;
+    fetch('/api/design', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var decor = document.getElementById('qb-decor');
+        if (decor && decor.innerHTML !== d.decor) {
+          /* Already through the server-side allowlist sanitiser, and the page
+             CSP forbids inline script regardless. */
+          decor.innerHTML = d.decor || '';
+        }
+
+        var frame = document.getElementById('qb-sketch');
+        if (!d.sketch) {
+          if (frame && frame.parentNode) frame.parentNode.removeChild(frame);
+          return;
+        }
+        var wanted = d.placement === 'above-chat' || d.placement === 'beside-chat'
+          ? document.getElementById('qb-main')
+          : document.getElementById('qb-root');
+        var before = d.placement === 'above-chat' || d.placement === 'beside-chat'
+          ? document.getElementById('chat')
+          : document.getElementById('qb-header');
+        if (!frame) {
+          frame = document.createElement('iframe');
+          frame.id = 'qb-sketch';
+          frame.title = 'Decorative sketch';
+          /* No allow-same-origin, ever: that would hand the frame this page. */
+          frame.setAttribute('sandbox', 'allow-scripts');
+          frame.setAttribute('referrerpolicy', 'no-referrer');
+        }
+        frame.className = d.sketchClass || '';
+        var src = d.sketchSrc + '&v=' + (version || d.version || Date.now());
+        if (frame.getAttribute('src') !== src) frame.setAttribute('src', src);
+        if (wanted && (frame.parentNode !== wanted || frame.nextSibling !== before)) {
+          wanted.insertBefore(frame, before || null);
+        }
+      })
+      .catch(function () { /* the stylesheet still swapped; leave the rest */ });
+  }
+
   function handle(ev) {
     if (ev.id) {
       if (seen[ev.id]) return;
@@ -201,6 +246,7 @@
         break;
       case 'reload':
         restyle(ev.version);
+        refreshParts(ev.version);
         setStatus('new look is live');
         break;
       case 'error':

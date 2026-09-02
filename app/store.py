@@ -20,7 +20,8 @@ CANDIDATE = DATA_DIR / "candidate.css"
 # A design is no longer just a stylesheet: it can also carry decorative markup
 # and a sandboxed sketch. All parts are versioned together, otherwise pinning an
 # old design from the gallery would pair its CSS with someone else's markup.
-PARTS = {"css": ".css", "decor": ".decor.html", "sketch": ".sketch.html"}
+PARTS = {"css": ".css", "decor": ".decor.html", "sketch": ".sketch.html",
+         "sketchplace": ".sketch.txt"}
 LAST_GOOD = DATA_DIR / "last_good.css"
 HISTORY_DIR = DATA_DIR / "history"
 META = DATA_DIR / "meta.json"

@@ -139,20 +139,23 @@ def main():
                          and isinstance(r.messages[0]["content"], str)))
 
     print()
-    print("the loop states the shrinking budget out loud:")
-    results.append(check("quiet early on", step_nudge(0, 14, 0, False, None)[0] is None))
-    results.append(check("quiet while revisions are few",
-                         step_nudge(1, 14, 2, False, None)[0] is None))
-    msg, marker = step_nudge(1, 14, 3, False, None)
-    results.append(check("nags after 3 blind revisions", msg is not None and marker == 3))
-    results.append(check("does not repeat for the same count",
-                         step_nudge(1, 14, 3, False, 3)[0] is None))
-    results.append(check("urges publishing near the limit",
-                         "publish now" in (step_nudge(11, 14, 5, False, 5)[0] or "")))
-    results.append(check("demands publishing on the last step",
-                         "LAST STEP" in (step_nudge(13, 14, 5, False, 5)[0] or "")))
+    print("the loop only speaks up when the budget is nearly gone:")
+    # It used to nag after three revisions and count down as the budget shrank,
+    # which reads as "you are taking too long" and pushed it to publish thin
+    # work. Staying quiet mid-run is the point of these.
+    results.append(check("quiet at the start", step_nudge(0, 24, 0, False, None)[0] is None))
+    results.append(check("quiet while iterating",
+                         step_nudge(4, 24, 6, False, None)[0] is None))
+    results.append(check("quiet even after many revisions",
+                         step_nudge(10, 24, 12, False, None)[0] is None))
+    near = step_nudge(21, 24, 2, False, None)[0] or ""
+    results.append(check("asks to publish only near the end", "not lost" in near, near[:40]))
+    results.append(check("does not frame it as taking too long",
+                         "stop refining" not in near.lower() and "imperfect" not in near.lower()))
+    results.append(check("insists on the last step",
+                         "LAST STEP" in (step_nudge(23, 24, 2, False, None)[0] or "")))
     results.append(check("silent once published",
-                         step_nudge(13, 14, 9, True, None)[0] is None))
+                         step_nudge(23, 24, 9, True, None)[0] is None))
 
     print()
     failed = results.count(False)

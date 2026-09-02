@@ -149,6 +149,28 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+# Where the sketch frame is mounted, and the class that styles it there. The
+# agent picks one; anything else falls back to the top slot.
+PLACEMENTS = {
+    "top": "qb-sketch-top",
+    "above-chat": "qb-sketch-main",
+    "beside-chat": "qb-sketch-main qb-sketch-beside",
+    "background": "qb-sketch-bg",
+}
+DEFAULT_PLACEMENT = "top"
+
+
+def _placement_for(kind, version=None):
+    if kind == "preview":
+        raw = store.candidate_part("sketchplace")
+    elif kind == "pinned":
+        raw = store.history_part("sketchplace", version)
+    else:
+        raw = store.current_part("sketchplace")
+    raw = (raw or "").strip()
+    return raw if raw in PLACEMENTS else DEFAULT_PLACEMENT
+
+
 def _parts_for(kind, version=None):
     """The decor markup and sketch frame that belong with a given stylesheet.
 
@@ -156,7 +178,7 @@ def _parts_for(kind, version=None):
     the fixed page and base.css.
     """
     if kind == "safe" or not (ENABLE_HTML or ENABLE_SKETCH):
-        return "", ""
+        return "", "", ""
     if kind == "preview":
         decor = store.candidate_part("decor")
         sketch = store.candidate_part("sketch")
@@ -173,14 +195,16 @@ def _parts_for(kind, version=None):
     decor_html = decor if (ENABLE_HTML and decor.strip()) else ""
     frame = ""
     if ENABLE_SKETCH and sketch.strip():
+        placement = _placement_for(kind, version)
         # sandbox WITHOUT allow-same-origin: the frame gets an opaque origin, so
         # its script cannot reach this document, its storage or its cookies.
         # Adding allow-same-origin here would undo the entire containment.
         frame = (
-            '<iframe id="qb-sketch" title="Decorative sketch" sandbox="allow-scripts" '
-            'referrerpolicy="no-referrer" loading="lazy" src="%s"></iframe>' % src
+            '<iframe id="qb-sketch" class="%s" title="Decorative sketch" '
+            'sandbox="allow-scripts" referrerpolicy="no-referrer" src="%s"></iframe>'
+            % (PLACEMENTS[placement], src)
         )
-    return decor_html, frame
+    return decor_html, frame, placement if frame else ""
 
 
 def _page(safe_mode=False, preview=False, pinned=None):
@@ -202,12 +226,15 @@ def _page(safe_mode=False, preview=False, pinned=None):
         sheet = '<link rel="stylesheet" href="/style.css?v=%s">' % v
         mode = "live"
     fonts = '<link rel="stylesheet" href="/fonts.css">' if ENABLE_FONTS else ""
-    decor, frame = _parts_for(mode, pinned)
+    decor, frame, placement = _parts_for(mode, pinned)
+    top = frame if placement in ("top", "background") else ""
+    main = frame if placement in ("above-chat", "beside-chat") else ""
     return (
         html.replace("<!--FONTS_CSS-->", fonts)
         .replace("<!--CUSTOM_STYLE-->", sheet)
         .replace("<!--DECOR-->", decor)
-        .replace("<!--SKETCH-->", frame)
+        .replace("<!--SKETCH_TOP-->", top)
+        .replace("<!--SKETCH_MAIN-->", main)
         .replace("{{MODE}}", mode)
     )
 
@@ -358,7 +385,11 @@ SKETCH_CSP = (
 async def sketch_html(request: Request):
     if not ENABLE_SKETCH:
         raise HTTPException(status_code=404, detail="sketches are disabled")
+    # The client appends a cache-busting v= on every publish; "live" and a bare
+    # version number both mean "whatever is current".
     which = request.query_params.get("v", "live")
+    if which.isdigit() and int(which) == store.read_meta().get("version", 0):
+        which = "live"
     if request.query_params.get("preview"):
         _require_local(request)
         body = store.candidate_part("sketch")
@@ -456,6 +487,25 @@ async def api_prompt(request: Request):
 
     ok, message = ORCHESTRATOR.submit(prompt)
     return JSONResponse({"ok": ok, "message": message, **ORCHESTRATOR.status()})
+
+
+@app.get("/api/design")
+async def api_design():
+    """The non-stylesheet parts of the live design.
+
+    Publishing used to swap only /style.css, so decoration and the sketch frame
+    appeared, changed or vanished only on a manual reload.
+    """
+    decor, frame, placement = _parts_for("live")
+    meta = store.read_meta()
+    return {
+        "version": meta.get("version", 0),
+        "decor": decor,
+        "sketch": bool(frame),
+        "placement": placement,
+        "sketchClass": PLACEMENTS.get(placement, ""),
+        "sketchSrc": "/sketch.html?v=live",
+    }
 
 
 @app.get("/api/status")

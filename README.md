@@ -183,6 +183,18 @@ had no way to act on "remove the game". And the sketch frame is
 prompt box; anything interactive needs `#qb-sketch{pointer-events:auto}`, at
 which point the validator starts checking it does not cover the input.
 
+The sketch frame can be placed: `top` (default), `above-chat`, `beside-chat`
+(the roomiest, sitting next to the transcript on wide screens and stacking on
+narrow ones) or `background` (fixed behind everything). It defaults to 900x420 -
+a clipped canvas was the common failure - and the agent's CSS can size it freely.
+The placement is versioned with the rest of the design, so pinning an old one
+from the gallery restores where its frame sat.
+
+Publishing swaps more than the stylesheet, so `/api/design` reports the markup
+and frame and the client applies them on a `reload` event. Without that, decor
+and the frame appeared, moved or vanished only when a visitor reloaded, since
+they are rendered into the HTML server-side.
+
 **Sketches** are contained by origin, not by sanitising their script - which is
 the only honest way to allow JS here. The frame is `sandbox="allow-scripts"`
 *without* `allow-same-origin`, so it gets an opaque origin, plus its own
@@ -226,7 +238,15 @@ Context is bounded rather than trusted to stay small: every run starts fresh,
 old screenshots are replaced by a placeholder so only the newest image is ever
 in context, and the transcript is mechanically compacted once it exceeds
 `MAX_CONTEXT_CHARS`, keeping the system prompt, a note about what was dropped,
-and the tail. `MAX_STEPS` ends a run that will not converge.
+and the tail. `MAX_STEPS` (24) ends a run that will not converge, and if steps
+run out with an unpublished candidate it is published rather than discarded.
+
+The budget is counted in steps, not seconds, deliberately: the inference
+endpoint is experimental and its speed varies a lot, so a wall-clock limit would
+truncate good work whenever the provider happened to be slow. The prompt asks it
+not to sink attempt after attempt into one stubborn detail, but there is no
+running countdown - that read as "you are taking too long" and pushed it to
+publish thin work.
 
 ## Not accumulating garbage
 

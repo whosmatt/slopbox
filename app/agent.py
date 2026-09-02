@@ -96,24 +96,15 @@ HARD RULES, enforced by machine - violating them wastes your turns:
 The screenshots show the chat log filled with sample messages so you can judge
 its readability; the live page shows real ones.
 
-WHEN TO STOP FIDDLING - your steps are limited, and running out publishes
-NOTHING, which is the worst outcome available to you:
-  * Publish as soon as the page looks decent. Publishing is not final - the
-    visitor can ask again, and you may keep improving after it is live. A
-    published good-enough look always beats an unpublished perfect one.
-  * Two attempts per detail, maximum. If it still is not right, DELETE that
-    detail and publish without it. Fighting one property is never worth a step.
+DON'T GET STUCK ON ONE DETAIL. You have plenty of steps, so take the time a
+good design needs - iterate, look, and refine. The one thing to avoid is
+sinking attempt after attempt into a single stubborn detail:
+  * Two or three tries on the same detail is plenty. If it still will not come
+    together, drop that detail and move on with the rest.
   * If the thing fighting you is something you invented rather than something
-    the visitor actually asked for, delete it immediately. Nobody is waiting
-    for it. Only the visitor's stated wish has to land.
-  * Never call write_css twice in a row without a screenshot or a publish in
-    between - rewriting blind burns your budget and tells you nothing.
-
-THE DESIGN IS MORE THAN THE STYLESHEET. Markup and the sketch frame persist
-from the previous design until you clear them, so when a visitor asks for
-something different, or asks you to remove something, call get_current_design
-first and then clear what should go: write_decor and write_sketch each take an
-empty string for that. Rewriting the stylesheet alone leaves both in place.
+    the visitor asked for, just remove it. Nobody is waiting for it.
+  * Look before you rewrite: a screenshot after each change tells you what
+    actually happened, and rewriting blind tells you nothing.
 
 WORKFLOW: write_css -> screenshot -> fix what looks wrong -> publish -> finish.
 Write a COMPLETE stylesheet every time; it replaces the previous one entirely.
@@ -146,11 +137,14 @@ if ENABLE_SKETCH:
         "<script> and <canvas> DO work. It is a separate little document with no "
         "access to this page and no network, so use it for motion and generative "
         "decoration, never for anything the page depends on. It defaults to a "
-        "620x200 block and your CSS can move or resize it. It is pointer-events:none "
-        "by default so it cannot steal clicks meant for the page - if you build "
-        "something interactive like a game you MUST add "
-        "#qb-sketch{pointer-events:auto} or it will not respond to clicks or keys "
-        "at all, and then keep it well clear of the prompt box. "
+        "frame is 900x420 by default and your CSS can size #qb-sketch however you "
+        "like - make it big, a clipped canvas is the usual mistake. Choose where it "
+        "sits with the placement argument: top (default), above-chat, beside-chat "
+        "(roomiest, sits next to the transcript on wide screens) or background "
+        "(fixed behind everything). It is pointer-events:none by default so it "
+        "cannot steal clicks meant for the prompt box - anything interactive like a "
+        "game MUST add #qb-sketch{pointer-events:auto}, and must then stay clear of "
+        "the prompt box. "
     )
 if _STRUCTURE:
     SYSTEM_PROMPT = SYSTEM_PROMPT + chr(10) + chr(10) + _STRUCTURE
@@ -301,7 +295,19 @@ SKETCH_TOOL = {
                         "A complete little document body - markup, <style> and "
                         "<script> are all fine here. Max %d bytes." % MAX_SKETCH_BYTES
                     ),
-                }
+                },
+                "placement": {
+                    "type": "string",
+                    "enum": ["top", "above-chat", "beside-chat", "background"],
+                    "description": (
+                        "Where the frame sits. top: above the header, the default. "
+                        "above-chat: in the main column, directly above the transcript. "
+                        "beside-chat: alongside the transcript on wide screens, stacking "
+                        "on narrow ones - the roomiest option for a game. background: "
+                        "fixed behind the whole page. Your CSS can size #qb-sketch "
+                        "however you like in any of them."
+                    ),
+                },
             },
             "required": ["html"],
             "additionalProperties": False,
@@ -322,16 +328,31 @@ STALE_IMAGE = (
 
 
 def step_nudge(step, max_steps, writes, published, last_nudge_writes):
-    """Escalating reminder for a model that keeps revising and never ships.
+    """A reminder only when the budget is genuinely about to run out.
 
-    Prose in the system prompt is easy for a small model to drift away from over
-    a long run, so the loop states the shrinking budget out loud as well.
-    Returns (message, marker); the marker is stored so the same nudge is not
-    repeated for the same number of revisions.
+    This used to nag after three revisions and again as the budget shrank,
+    which the model read as "you are taking too long" and which pushed it to
+    publish thin work. The concern was only ever about fixating on one detail,
+    and that belongs in the system prompt as guidance, not as a running
+    countdown. What is left here just stops finished work being thrown away.
     """
     remaining = max_steps - step
     if published:
         return None, last_nudge_writes
+    if remaining <= 1:
+        return (
+            "LAST STEP. Publish what you have now - an unpublished design reaches "
+            "nobody, and you can always refine it next time.",
+            last_nudge_writes,
+        )
+    if remaining <= 3 and writes > 0:
+        return (
+            "%d steps left and nothing is live yet. Publish what you have so the "
+            "work is not lost; there is still room to improve it afterwards."
+            % remaining,
+            last_nudge_writes,
+        )
+    return None, last_nudge_writes
 
     if remaining <= 1:
         return (
@@ -616,15 +637,19 @@ class Run:
                 "Rejected: sketch is %d bytes, limit %d. Make it smaller."
                 % (len(html.encode("utf-8")), MAX_SKETCH_BYTES)
             ), None
+        placement = str(args.get("placement") or "").strip()
+        if placement not in ("top", "above-chat", "beside-chat", "background"):
+            placement = "top"
         store.set_candidate_part("sketch", html)
+        store.set_candidate_part("sketchplace", placement)
         self.writes += 1
         self._invalidate_screenshots()
         if not html.strip():
             return "Sketch frame removed. Screenshot to see the result.", None
         return (
-            "Sketch accepted (%d bytes). It runs sandboxed with no page access and no "
-            "network. Not live yet - screenshot to see it, then publish."
-            % len(html)
+            "Sketch accepted (%d bytes), placed %s. It runs sandboxed with no page "
+            "access and no network. Not live yet - screenshot to see it, then publish."
+            % (len(html), placement)
         ), None
 
     async def _tool_screenshot(self, args):
