@@ -13,6 +13,8 @@ Screenshots are returned as bytes and never touch the filesystem.
 from __future__ import annotations
 
 import asyncio
+import struct
+import zlib
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -72,14 +74,37 @@ CHECK_JS = r"""
   if (r.width < 80) problems.push('the prompt input is too narrow (' + Math.round(r.width) + 'px, need >= 80px)');
   if (r.height < 20) problems.push('the prompt input is too short (' + Math.round(r.height) + 'px, need >= 20px)');
 
-  const ix = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
-  const iy = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-  const area = Math.max(1, r.width * r.height);
-  const visible = (ix * iy) / area;
-  if (visible < 0.6) problems.push('the prompt input is ' + Math.round((1 - visible) * 100) + '% outside the viewport - it must stay on screen without scrolling');
 
-  const cx = Math.min(vw - 1, Math.max(1, r.left + r.width / 2));
-  const cy = Math.min(vh - 1, Math.max(1, r.top + r.height / 2));
+  // Below the fold is not the same as unreachable: a tall design is fine as long
+  // as the visitor can scroll to the box. So try scrolling to it and judge what
+  // happens - which still fails anything genuinely out of reach, like a fixed
+  // element parked off screen or one at left:-4000px, since neither can be
+  // scrolled into view.
+  const coverage = (box) => {
+    const ix = Math.max(0, Math.min(box.right, vw) - Math.max(box.left, 0));
+    const iy = Math.max(0, Math.min(box.bottom, vh) - Math.max(box.top, 0));
+    return (ix * iy) / Math.max(1, box.width * box.height);
+  };
+  let rect = r, visible = coverage(r), scrolled = false;
+  if (visible < 0.6) {
+    // Vertically only, and deliberately not scrollIntoView: that also scrolls
+    // sideways, which would bless an input flung 4000px to the right as
+    // "reachable". Needing to scroll down is normal; needing to scroll across
+    // to find the prompt box is not.
+    const docY = r.top + window.scrollY;
+    window.scrollTo(0, Math.max(0, docY - vh / 2 + r.height / 2));
+    rect = el.getBoundingClientRect();
+    visible = coverage(rect);
+    scrolled = true;
+  }
+  if (visible < 0.6) {
+    problems.push('the prompt input is ' + Math.round((1 - visible) * 100) +
+      '% off screen and scrolling down does not bring it into view - the page ' +
+      'must never need sideways scrolling to reach it');
+  }
+
+  const cx = Math.min(vw - 1, Math.max(1, rect.left + rect.width / 2));
+  const cy = Math.min(vh - 1, Math.max(1, rect.top + rect.height / 2));
 
   if (cs.pointerEvents === 'none') problems.push('the prompt input has pointer-events:none so it cannot be clicked');
 
@@ -118,12 +143,12 @@ CHECK_JS = r"""
     bnode = bnode.parentElement;
   }
   if (!bg) bg = { r: 255, g: 255, b: 255, a: 1 };
-  if (fg) {
-    if (fg.a < 0.35) {
-      problems.push('the prompt input text colour is nearly transparent - typing would be invisible');
-    } else if (contrast(fg, bg) < 1.7) {
-      problems.push('the prompt input text has almost no contrast against its background (ratio ' + contrast(fg, bg).toFixed(2) + ', need >= 1.7) - typing would be invisible');
-    }
+  // Only the alpha case is decidable from computed styles. The ratio itself is
+  // measured from rendered pixels in Python: reading background-color alone
+  // cannot see a gradient, an image or a pattern, and would fall through to
+  // some ancestor's colour and reject perfectly readable text.
+  if (fg && fg.a < 0.35) {
+    problems.push('the prompt input text colour is nearly transparent - typing would be invisible');
   }
   // The chat log is where the visitor watches the agent work, so it is a hard
   // requirement too, not decoration. /preview seeds it with sample messages so
@@ -170,7 +195,14 @@ CHECK_JS = r"""
         if (mr.height < 18 || mr.width < 60) return;
         const tc = parseColor(getComputedStyle(t).color);
         if (!tc || tc.a < 0.35) return;
-        if (contrast(tc, effectiveBg(t)) < 1.7) return;
+        // A gradient or image behind the text makes the computed-style
+        // comparison meaningless, so only judge contrast over a solid colour.
+        let painted = false, pn = t;
+        while (pn && pn.nodeType === 1) {
+          if ((getComputedStyle(pn).backgroundImage || 'none') !== 'none') { painted = true; break; }
+          pn = pn.parentElement;
+        }
+        if (!painted && contrast(tc, effectiveBg(t)) < 1.7) return;
         readable++;
       });
       if (readable === 0) {
@@ -193,7 +225,10 @@ CHECK_JS = r"""
   return {
     problems, warnings,
     info: {
-      rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+      rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+      scrolledIntoView: scrolled,
+      // page coordinates, for a one-pixel background sample
+      probe: { x: Math.round(cx + window.scrollX), y: Math.round(cy + window.scrollY) },
       viewport: { w: vw, h: vh },
       opacity: Number(opacity.toFixed(2)),
       color: cs.color, background: cs.backgroundColor, fontSize: cs.fontSize
@@ -201,6 +236,121 @@ CHECK_JS = r"""
   };
 }
 """
+
+
+def _first_pixel_rgb(png):
+    """The top-left pixel of a PNG, without an image library.
+
+    Only pixel (0,0) is ever needed, and that one is filter-independent: every
+    PNG filter predicts from the pixel to the left and the row above, both of
+    which are zero there, so the stored bytes are the raw values.
+    """
+    if len(png) < 26 or png[:8] != bytes((137, 80, 78, 71, 13, 10, 26, 10)):
+        return None
+    pos, width, height, depth, colour = 8, 0, 0, 0, 0
+    idat = bytearray()
+    while pos + 8 <= len(png):
+        length, kind = struct.unpack(">I4s", png[pos:pos + 8])
+        body = png[pos + 8:pos + 8 + length]
+        if kind == b"IHDR":
+            width, height, depth, colour = struct.unpack(">IIBB", body[:10])
+        elif kind == b"IDAT":
+            idat += body
+        elif kind == b"IEND":
+            break
+        pos += 12 + length
+    if depth != 8 or not idat:
+        return None
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(colour)
+    if channels is None:
+        return None
+    try:
+        raw = zlib.decompress(bytes(idat))
+    except zlib.error:
+        return None
+    if len(raw) < 1 + channels:
+        return None
+    px = raw[1:1 + channels]          # skip the scanline's filter byte
+    if colour in (0, 4):
+        return (px[0], px[0], px[0])
+    return (px[0], px[1], px[2])
+
+
+def _luminance(rgb):
+    def channel(v):
+        v /= 255.0
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    r, g, b = rgb
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+
+def contrast_ratio(a, b):
+    la, lb = _luminance(a), _luminance(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def _parse_rgb(value):
+    try:
+        inner = value[value.index("(") + 1:value.index(")")]
+        parts = [float(x.strip()) for x in inner.split(",")]
+        return (parts[0], parts[1], parts[2])
+    except (ValueError, IndexError):
+        return None
+
+
+HIDE_TEXT_JS = """
+() => {
+  const el = document.getElementById('prompt-input');
+  if (!el) return null;
+  const prev = { value: el.value, colour: el.style.getPropertyValue('color'),
+                 priority: el.style.getPropertyPriority('color') };
+  // A single space hides the placeholder (which is painted with its own colour,
+  // so making `color` transparent would not), leaving only the background.
+  el.value = ' ';
+  el.style.setProperty('color', 'transparent', 'important');
+  return prev;
+}
+"""
+
+RESTORE_TEXT_JS = """
+(prev) => {
+  const el = document.getElementById('prompt-input');
+  if (!el || !prev) return;
+  el.value = prev.value;
+  el.style.removeProperty('color');
+  if (prev.colour) el.style.setProperty('color', prev.colour, prev.priority || '');
+}
+"""
+
+MIN_CONTRAST = 1.7
+
+
+async def measure_text_contrast(page, info):
+    """Compare the input's text colour against the pixel actually rendered
+    behind it. Computed styles cannot see a gradient, image or pattern, so
+    reading background-color alone rejected plenty of readable designs."""
+    probe = (info or {}).get("probe") or {}
+    fg = _parse_rgb((info or {}).get("color") or "")
+    if fg is None or "x" not in probe:
+        return None
+    prev = await page.evaluate(HIDE_TEXT_JS)
+    try:
+        shot = await page.screenshot(
+            clip={"x": probe["x"], "y": probe["y"], "width": 1, "height": 1}
+        )
+    finally:
+        await page.evaluate(RESTORE_TEXT_JS, prev)
+    bg = _first_pixel_rgb(shot)
+    if bg is None:
+        return None
+    ratio = contrast_ratio(fg, bg)
+    if ratio < MIN_CONTRAST:
+        return (
+            "the prompt input text is almost invisible against what is actually "
+            "rendered behind it (contrast %.2f, need %.2f)" % (ratio, MIN_CONTRAST)
+        )
+    return None
 
 
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
@@ -355,6 +505,12 @@ class BrowserPool:
                             )
 
                     info[label] = (last or {}).get("info", {})
+                    try:
+                        issue = await measure_text_contrast(page, info[label])
+                    except Exception:
+                        issue = None
+                    if issue:
+                        problems.append("[%s] %s" % (label, issue))
                     shots[label] = await page.screenshot(type="jpeg", quality=72)
                 except Exception as exc:
                     problems.append(

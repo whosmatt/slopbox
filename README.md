@@ -62,10 +62,28 @@ Nothing goes live until a real Chromium says the page is still usable. The
 candidate is rendered at 1280x800 and 390x844, and at 0s, 0.6s, 1.8s and 3.2s
 after load - the time sampling is what stops an animation from parking the input
 off-screen just after a naive one-shot check. At every sample the prompt input
-must be rendered, at least 80x20px, at least 60% inside the viewport, not
-blurred or transparent, hit-testable at its centre point, and readable
-(>= 1.7:1 contrast against its own background). Then it must actually take
-keyboard focus and accept typed text.
+must be rendered, at least 80x20px, not blurred or transparent, hit-testable at
+its centre point, reachable, and readable. Then it must actually take keyboard
+focus and accept typed text.
+
+Two of those deserve their own note, because the obvious implementations produce
+false positives that reject perfectly good designs:
+
+- **Reachable, not "in the viewport".** A tall design legitimately puts the box
+  below the fold on a short window; that is scrolling, not breakage. The check
+  scrolls **vertically only** and re-measures. Deliberately not
+  `scrollIntoView`, which also scrolls sideways and would bless an input flung
+  4000px to the right as reachable - needing to scroll down is normal, needing
+  to scroll across to find the prompt box is not.
+- **Contrast is measured from rendered pixels**, not computed styles. Reading
+  `background-color` cannot see a gradient, image or pattern: it reads as
+  transparent, the walk falls through to some ancestor's colour, and white text
+  on an orange gradient gets rejected as white-on-white. The validator instead
+  blanks the text, screenshots a single pixel behind it and compares. That is
+  both more permissive (gradients pass) and stricter - `linear-gradient(#fff,#fff)`
+  under white text is caught, which the computed-style check could not see at
+  all. Decoding one pixel needs no image library: pixel (0,0) is
+  filter-independent in every PNG.
 
 The chat log is gated the same way, because watching the agent work is half the
 point: `#chat` must be visible and, when it holds messages, at least one must be
@@ -154,6 +172,16 @@ more than the tag list:
   disarming the guard and the validator.
 - `url(...)` in paint attributes may only reference a fragment in the same
   markup, so decoration cannot become an outbound request.
+
+A design is more than its stylesheet, and that has two consequences worth
+knowing. Markup and sketches **persist across designs** until explicitly cleared
+with an empty string, which is right for iteration but means rewriting the CSS
+alone does not remove them. So `get_current_design` reports all three parts, not
+just the CSS - without that the model could not see that a sketch existed and
+had no way to act on "remove the game". And the sketch frame is
+`pointer-events: none` by default so it can never steal clicks meant for the
+prompt box; anything interactive needs `#qb-sketch{pointer-events:auto}`, at
+which point the validator starts checking it does not cover the input.
 
 **Sketches** are contained by origin, not by sanitising their script - which is
 the only honest way to allow JS here. The frame is `sandbox="allow-scripts"`

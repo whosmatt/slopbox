@@ -81,11 +81,13 @@ HARD RULES, enforced by machine - violating them wastes your turns:
     data URIs, no external requests of any kind. Web fonts are unavailable, so
     use font-family stacks of generic and common system fonts.
   * Allowed at-rules: @media, @supports, @keyframes, @layer, @container.
-  * #prompt-input must stay visible, at least 80x20px, on screen without
-    scrolling, unobstructed at its centre point, and readable (text contrast
-    against its own background at least 1.7:1). This is checked at 1280x800 and
-    390x844, at 0s, 0.6s, 1.8s and 3.2s after load - so if you animate the
-    input, keep it on screen and hit-testable for the whole animation.
+  * #prompt-input must stay visible, at least 80x20px, unobstructed at its
+    centre point, and readable. A tall design is fine - the visitor can scroll
+    down to the box - but it must never need sideways scrolling to be reached.
+    Readability is measured from the pixels actually rendered behind the text,
+    so gradients, patterns and images are all fair game; only genuinely
+    invisible text fails. Checked at 1280x800 and 390x844, at 0s, 0.6s, 1.8s and
+    3.2s after load, so an animated input must stay reachable throughout.
   * The chat log must stay readable: #chat visible, and .msg / .msg-text with
     real contrast and enough height to read. It is how the visitor watches you
     work, so style it, do not erase it.
@@ -106,6 +108,12 @@ NOTHING, which is the worst outcome available to you:
     for it. Only the visitor's stated wish has to land.
   * Never call write_css twice in a row without a screenshot or a publish in
     between - rewriting blind burns your budget and tells you nothing.
+
+THE DESIGN IS MORE THAN THE STYLESHEET. Markup and the sketch frame persist
+from the previous design until you clear them, so when a visitor asks for
+something different, or asks you to remove something, call get_current_design
+first and then clear what should go: write_decor and write_sketch each take an
+empty string for that. Rewriting the stylesheet alone leaves both in place.
 
 WORKFLOW: write_css -> screenshot -> fix what looks wrong -> publish -> finish.
 Write a COMPLETE stylesheet every time; it replaces the previous one entirely.
@@ -138,7 +146,11 @@ if ENABLE_SKETCH:
         "<script> and <canvas> DO work. It is a separate little document with no "
         "access to this page and no network, so use it for motion and generative "
         "decoration, never for anything the page depends on. It defaults to a "
-        "620x200 block, pointer-events:none, and your CSS can move or resize it. "
+        "620x200 block and your CSS can move or resize it. It is pointer-events:none "
+        "by default so it cannot steal clicks meant for the page - if you build "
+        "something interactive like a game you MUST add "
+        "#qb-sketch{pointer-events:auto} or it will not respond to clicks or keys "
+        "at all, and then keep it well clear of the prompt box. "
     )
 if _STRUCTURE:
     SYSTEM_PROMPT = SYSTEM_PROMPT + chr(10) + chr(10) + _STRUCTURE
@@ -157,8 +169,13 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "get_current_css",
-            "description": "Read the stylesheet that is currently live on the site.",
+            "name": "get_current_design",
+            "description": (
+                "Read everything that is currently live: the stylesheet, the "
+                "decorative markup and the sketch frame. Read this before changing "
+                "direction - markup and sketch carry over from the previous design "
+                "unless you explicitly clear them."
+            ),
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
@@ -511,7 +528,7 @@ class Run:
             "role": "user",
             "content": (
                 "[context compacted: %d earlier steps removed. You have already been "
-                "iterating on this stylesheet. Call get_current_css or write_css with a "
+                "iterating on this stylesheet. Call get_current_design, or write_css with a "
                 "complete stylesheet and publish it - do not assume earlier CSS survived "
                 "in your memory.]" % dropped
             ),
@@ -528,11 +545,30 @@ class Run:
             guard += 1
 
     # -- tools -----------------------------------------------------------
-    async def _tool_get_current_css(self, args):
-        css = store.current_css()
-        if len(css) > 20000:
-            css = css[:20000] + "\n/* ...truncated... */"
-        return "Current live stylesheet:\n\n" + css, None
+    async def _tool_get_current_design(self, args):
+        def clip(text, limit):
+            return text if len(text) <= limit else text[:limit] + " ...(truncated)"
+
+        parts = ["Current live stylesheet:", "", clip(store.current_css(), 16000)]
+
+        if ENABLE_HTML:
+            decor = store.current_part("decor").strip()
+            parts += ["", "Decorative markup in #qb-decor:"]
+            parts += (
+                ["", clip(decor, 4000), "",
+                 "To remove it entirely, call write_decor with an empty string."]
+                if decor else ["", "(none)"]
+            )
+        if ENABLE_SKETCH:
+            sketch = store.current_part("sketch").strip()
+            parts += ["", "Sketch frame #qb-sketch:"]
+            parts += (
+                ["", clip(sketch, 4000), "",
+                 "To remove it entirely, call write_sketch with an empty string. "
+                 "Rewriting only the stylesheet does NOT remove it."]
+                if sketch else ["", "(none)"]
+            )
+        return chr(10).join(parts), None
 
     async def _tool_write_css(self, args):
         css = args.get("css")
@@ -660,7 +696,7 @@ class Run:
 
     async def _dispatch(self, name, args):
         handler = {
-            "get_current_css": self._tool_get_current_css,
+            "get_current_design": self._tool_get_current_design,
             "write_css": self._tool_write_css,
             "screenshot": self._tool_screenshot,
             "publish": self._tool_publish,

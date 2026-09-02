@@ -186,7 +186,9 @@
         break;
       case 'tool':
         setStatus({
-          get_current_css: 'reading the current stylesheet…',
+          get_current_design: 'reading the current design…',
+          write_decor: 'drawing markup…',
+          write_sketch: 'writing a sketch…',
           write_css: 'writing CSS…',
           screenshot: 'looking at the result…',
           publish: 'validating in a real browser…',

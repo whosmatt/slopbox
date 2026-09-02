@@ -41,6 +41,10 @@ SHOULD_FAIL = [
     ("chat invisible text", "#chat .msg{background:#000}#chat .msg-text{color:#050505}"),
     ("chat collapsed", "#chat{height:4px;overflow:hidden}"),
     ("chat transparent", "#chat{opacity:0.05}"),
+    # Contrast is measured from the rendered pixel, so hiding the text behind a
+    # gradient does not evade it - background-color alone could not see this.
+    ("invisible via a gradient",
+     "#prompt-input{background:linear-gradient(#fff,#fff);color:#fff;border:0}"),
 ]
 
 SHOULD_PASS = [
@@ -55,6 +59,15 @@ SHOULD_PASS = [
     ("crooked whimsy", "body{background:repeating-linear-gradient(45deg,#ff0,#ff0 20px,#f0f 20px,"
                        "#f0f 40px)}#prompt-input{transform:rotate(-3deg);background:#fff;color:#000;"
                        "border:5px solid #000;font-size:22px}"),
+    # Reported false positives, kept as fixtures. Reading background-color alone
+    # cannot see a gradient and fell through to an ancestor's colour, rejecting
+    # readable text; and a tall design legitimately puts the input below the
+    # fold on a short viewport, which is scrolling, not breakage.
+    ("white text on a gradient box",
+     "#prompt-input{background:linear-gradient(90deg,#ff6b11,#ff9d00);color:#fff;border:0}"),
+    ("off-white text on a green box",
+     "#prompt-input{background:#2e7d32;color:#f2fff2;border:0}"),
+    ("input below the fold on a tall page", "#qb-header{padding:70vh 0 0}"),
     # A heavily restyled but still readable chat log must not trip the gate.
     (
         "chat restyled",

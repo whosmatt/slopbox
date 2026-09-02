@@ -60,7 +60,29 @@
 
     var ix = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
     var iy = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-    if ((ix * iy) / Math.max(1, r.width * r.height) < 0.5) return 'the input field has moved off screen';
+    if ((ix * iy) / Math.max(1, r.width * r.height) < 0.5) {
+      /* Below the fold is not broken - the visitor can simply scroll, and on a
+         short window a tall design puts the box there legitimately. Work out
+         whether it is reachable without actually scrolling: moving the page
+         under the visitor every poll would be worse than the bug. */
+      var fixed = false, n = el;
+      while (n && n.nodeType === 1) {
+        if (getComputedStyle(n).position === 'fixed') { fixed = true; break; }
+        n = n.parentElement;
+      }
+      var docTop = r.top + window.scrollY;
+      var docLeft = r.left + window.scrollX;
+      var docH = Math.max(document.documentElement.scrollHeight,
+                          document.body ? document.body.scrollHeight : 0);
+      var docW = Math.max(document.documentElement.scrollWidth,
+                          document.body ? document.body.scrollWidth : 0);
+      /* A fixed element does not scroll into view, so for those the viewport is
+         all there is. */
+      var reachable = !fixed &&
+        docTop + r.height > 0 && docTop < docH &&
+        docLeft + r.width > 0 && docLeft < docW;
+      if (!reachable) return 'the input field has moved off screen';
+    }
 
     if (cs.pointerEvents === 'none') return 'the input field cannot be clicked';
 
@@ -90,7 +112,18 @@
         if (c && c.a > 0.2) { bg = c; break; }
         b = b.parentElement;
       }
-      if (bg && contrast(fg, bg) < 1.35) return 'text typed into the field would be unreadable';
+      /* A gradient, image or pattern behind the text makes this comparison
+         meaningless - background-color reads as transparent and the walk falls
+         through to some ancestor's colour, which rejected plenty of readable
+         designs. The server-side validator measures the real pixel instead. */
+      var painted = false, pn = el;
+      while (pn && pn.nodeType === 1) {
+        if ((getComputedStyle(pn).backgroundImage || 'none') !== 'none') { painted = true; break; }
+        pn = pn.parentElement;
+      }
+      if (!painted && bg && contrast(fg, bg) < 1.35) {
+        return 'text typed into the field would be unreadable';
+      }
     }
     return null;
   }
