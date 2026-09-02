@@ -64,7 +64,11 @@ def _remember(env):
                 pass
         return
 
-    if etype in ("prompt", "message", "tool", "status", "error", "reload"):
+    # "reload" is deliberately absent: it is a live signal, not history. The
+    # server already renders the current stylesheet version into the HTML for
+    # anyone arriving later, so replaying old reloads only made fresh page loads
+    # inject stylesheets again - including onto ?safe=1, which must stay bare.
+    if etype in ("prompt", "message", "tool", "status", "error"):
         _replay.append(dict(env))
 
 

@@ -66,6 +66,55 @@ SHOULD_PASS = [
 ]
 
 
+PAGE_WIRING_JS = r"""
+() => ({
+  mode: document.documentElement.getAttribute('data-mode'),
+  styleSheets: [...document.querySelectorAll('link[rel=stylesheet]')]
+    .map(l => l.getAttribute('href')),
+  ownSheets: document.querySelectorAll('link[data-qb-style]').length,
+  bodyBg: getComputedStyle(document.body).backgroundColor,
+})
+"""
+
+
+async def check_page_wiring(base):
+    """Two bugs that shipped, and that no CSS fixture would have caught.
+
+    1. `reload` events used to sit in the SSE replay buffer, so every fresh page
+       load re-applied them - which styled ?safe=1, the one page that must stay
+       bare.
+    2. restyle() removed a single link captured up front, so two swaps in quick
+       succession left an orphan sheet behind. An orphan with !important rules
+       outranks the new sheet, so the page kept its old background until F5.
+    """
+    problems = []
+    if POOL._browser is None:
+        await POOL.start()
+    context = await POOL._browser.new_context(viewport={"width": 1000, "height": 700})
+    try:
+        page = await context.new_page()
+        await page.goto(base + "/?safe=1", wait_until="load")
+        await page.wait_for_timeout(2500)
+        safe = await page.evaluate(PAGE_WIRING_JS)
+        if any("style.css" in (h or "") for h in safe["styleSheets"]):
+            problems.append("?safe=1 pulled in the live stylesheet: %s" % safe["styleSheets"])
+        if safe["bodyBg"] != "rgb(255, 255, 255)":
+            problems.append("?safe=1 is not the bland base look (bg %s)" % safe["bodyBg"])
+
+        page2 = await context.new_page()
+        await page2.goto(base + "/", wait_until="load")
+        await page2.wait_for_timeout(2000)
+        live = await page2.evaluate(PAGE_WIRING_JS)
+        if live["ownSheets"] != 1:
+            problems.append(
+                "the live page carries %d slopbox stylesheets, expected exactly 1: %s"
+                % (live["ownSheets"], live["styleSheets"])
+            )
+    finally:
+        await context.close()
+    return problems
+
+
 async def main():
     store.init()
     await POOL.start()
@@ -99,6 +148,18 @@ async def main():
     finally:
         store.clear_candidate()
         await POOL.stop()
+
+    print()
+    print("page wiring:")
+    try:
+        wiring = await check_page_wiring(self_url())
+        for w in wiring:
+            failures.append("PAGE WIRING: " + w)
+            print("  FAIL       %s" % w[:74])
+        if not wiring:
+            print("  ok         ?safe=1 stays bare; live page carries exactly one stylesheet")
+    except Exception as exc:
+        print("  skipped    (%s: %s)" % (type(exc).__name__, str(exc)[:60]))
 
     print()
     if failures:

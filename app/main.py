@@ -135,6 +135,9 @@ async def security_headers(request: Request, call_next):
         response.headers.setdefault(k, v)
     if request.url.path in ("/", "/preview"):
         response.headers["Content-Security-Policy"] = CSP
+        # The HTML embeds the current stylesheet version, so a cached copy sends
+        # a reloading visitor to a stale /style.css?v=N.
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 

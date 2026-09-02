@@ -129,17 +129,32 @@
     if (button) button.disabled = false; /* queuing while busy is allowed */
   }
 
+  var SAFE_MODE = document.documentElement.getAttribute('data-mode') === 'safe';
+
   function restyle(version) {
-    var link = document.querySelector('link[data-qb-style]') ||
-      document.querySelector('link[href^="/style.css"]');
+    /* Safe mode is served deliberately bare; nothing may style it back. */
+    if (SAFE_MODE) return;
+
     var fresh = document.createElement('link');
     fresh.rel = 'stylesheet';
     fresh.setAttribute('data-qb-style', '1');
     fresh.href = '/style.css?v=' + (version || Date.now());
-    fresh.addEventListener('load', function () {
-      if (link && link !== fresh && link.parentNode) link.parentNode.removeChild(link);
+
+    function sweep() {
+      /* Remove every other slopbox sheet rather than one node captured up
+         front. Two restyles in quick succession used to each remove the node
+         the other had captured, leaving an orphan behind - and an orphan whose
+         rules are !important outranks the new sheet, so the page kept the old
+         background until a reload. */
+      var old = document.querySelectorAll('link[data-qb-style]');
+      for (var i = 0; i < old.length; i++) {
+        if (old[i] !== fresh && old[i].parentNode) old[i].parentNode.removeChild(old[i]);
+      }
       window.dispatchEvent(new Event('slopbox:restyled'));
-    });
+    }
+
+    fresh.addEventListener('load', sweep);
+    fresh.addEventListener('error', sweep);
     document.head.appendChild(fresh);
   }
 
