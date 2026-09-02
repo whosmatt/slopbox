@@ -129,11 +129,14 @@
     if (button) button.disabled = false; /* queuing while busy is allowed */
   }
 
-  var SAFE_MODE = document.documentElement.getAttribute('data-mode') === 'safe';
+  var MODE = document.documentElement.getAttribute('data-mode');
+  /* safe   - served deliberately bare, nothing may style it back
+     pinned - showing a design chosen from the gallery, which must survive
+              whatever anyone else publishes while this visitor reads it */
+  var NO_RESTYLE = MODE === 'safe' || MODE === 'pinned';
 
   function restyle(version) {
-    /* Safe mode is served deliberately bare; nothing may style it back. */
-    if (SAFE_MODE) return;
+    if (NO_RESTYLE) return;
 
     var fresh = document.createElement('link');
     fresh.rel = 'stylesheet';
@@ -245,7 +248,7 @@
      chat log with representative messages there instead of connecting to the
      live stream: it makes the readability checks deterministic, and it means the
      model's own screenshots show what the chat will actually look like. */
-  if (document.documentElement.getAttribute('data-mode') === 'preview') {
+  if (MODE === 'preview') {
     addMessage('user', 'make it look like a haunted library at midnight');
     addMessage('thinking', 'The visitor wants something gothic and dim. Deep ' +
       'browns, candlelight amber, a serif face, and a slow flicker on the ' +

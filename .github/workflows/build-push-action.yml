@@ -39,6 +39,9 @@ jobs:
       - name: Queue and context suite
         run: python -m tests.test_steering
 
+      - name: History ring suite
+        run: python -m tests.test_store
+
       # Dependabot bumps the base image (docker) and the pip package in separate
       # PRs and cannot see that they are one unit. Merging either alone ships an
       # image whose browsers do not match its Playwright library - and no other

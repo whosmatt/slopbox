@@ -18,6 +18,9 @@ CANDIDATE = DATA_DIR / "candidate.css"
 LAST_GOOD = DATA_DIR / "last_good.css"
 HISTORY_DIR = DATA_DIR / "history"
 META = DATA_DIR / "meta.json"
+# Per-version notes for the gallery (the prompt that produced each look).
+# Trimmed alongside the history ring, so it cannot grow either.
+HISTORY_INDEX = DATA_DIR / "history.json"
 
 _lock = threading.RLock()
 
@@ -96,6 +99,7 @@ def publish_candidate(prompt):
         meta["updated"] = time.time()
         _write_meta(meta)
         _snapshot(meta["version"], css)
+        _record_history(meta["version"], prompt)
         CANDIDATE.unlink(missing_ok=True)
         return meta["version"]
 
@@ -118,7 +122,13 @@ def rollback():
 
 
 def reset():
-    """Back to bland."""
+    """Return the live look to bland, keeping the gallery.
+
+    Reset is the emergency lever for a bad style, so it deliberately does NOT
+    delete the archive any more: destroying twenty browsable designs as a side
+    effect of recovering the front page is the wrong trade, and leaving them
+    means a visitor can still pin one afterwards.
+    """
     with _lock:
         LAST_GOOD.write_text(SEED_CSS, encoding="utf-8")
         CURRENT.write_text(SEED_CSS, encoding="utf-8")
@@ -128,8 +138,6 @@ def reset():
         meta["updated"] = time.time()
         _write_meta(meta)
         CANDIDATE.unlink(missing_ok=True)
-        for f in HISTORY_DIR.glob("*.css"):
-            f.unlink(missing_ok=True)
         return meta["version"]
 
 
@@ -139,10 +147,103 @@ def _snapshot(version, css):
     _prune_history()
 
 
-def _prune_history():
+def save_shot(version, jpeg):
+    """Keep the validated render of a published version, for the gallery.
+
+    This is the one place screenshots touch disk. It is bounded exactly like the
+    stylesheet ring - one image per retained version, pruned together with it -
+    so the ceiling stays fixed rather than growing with use.
+    """
+    with _lock:
+        if not (HISTORY_DIR / ("%06d.css" % version)).exists():
+            return False
+        (HISTORY_DIR / ("%06d.jpg" % version)).write_bytes(jpeg)
+        _prune_history()
+        return True
+
+
+def shot_bytes(version):
     try:
-        files = sorted(HISTORY_DIR.glob("*.css"))
+        return (HISTORY_DIR / ("%06d.jpg" % int(version))).read_bytes()
+    except (OSError, ValueError):
+        return None
+
+
+def history_css(version):
+    """The stylesheet of a retained version, or None if it has aged out."""
+    try:
+        return (HISTORY_DIR / ("%06d.css" % int(version))).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+
+
+def _read_index():
+    try:
+        data = json.loads(HISTORY_INDEX.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _record_history(version, prompt):
+    index = _read_index()
+    index[str(version)] = {"prompt": prompt[:400], "ts": time.time()}
+    HISTORY_INDEX.write_text(json.dumps(index, indent=2), encoding="utf-8")
+
+
+def _versions_on_disk():
+    try:
+        out = []
+        for f in HISTORY_DIR.glob("*.css"):
+            try:
+                out.append(int(f.stem))
+            except ValueError:
+                continue
+        return sorted(out)
     except FileNotFoundError:
-        return
-    for stale in files[:-HISTORY_KEEP] if len(files) > HISTORY_KEEP else []:
-        stale.unlink(missing_ok=True)
+        return []
+
+
+def history_entries():
+    """Retained designs, newest first, for the gallery.
+
+    Files on disk are the source of truth; the index only decorates them. That
+    way a store written before the index existed still lists correctly, just
+    without prompts.
+    """
+    index = _read_index()
+    entries = []
+    for v in reversed(_versions_on_disk()):
+        note = index.get(str(v)) or {}
+        entries.append(
+            {
+                "version": v,
+                "prompt": note.get("prompt") or "",
+                "ts": note.get("ts") or 0.0,
+                "has_shot": (HISTORY_DIR / ("%06d.jpg" % v)).exists(),
+            }
+        )
+    return entries
+
+
+def _prune_history():
+    versions = _versions_on_disk()
+    keep = set(versions[-HISTORY_KEEP:]) if len(versions) > HISTORY_KEEP else set(versions)
+    for v in versions:
+        if v not in keep:
+            (HISTORY_DIR / ("%06d.css" % v)).unlink(missing_ok=True)
+            (HISTORY_DIR / ("%06d.jpg" % v)).unlink(missing_ok=True)
+    # Images whose stylesheet has aged out, and index rows for both.
+    try:
+        for f in HISTORY_DIR.glob("*.jpg"):
+            try:
+                if int(f.stem) not in keep:
+                    f.unlink(missing_ok=True)
+            except ValueError:
+                f.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
+    index = _read_index()
+    trimmed = {k: v for k, v in index.items() if k.isdigit() and int(k) in keep}
+    if trimmed != index:
+        HISTORY_INDEX.write_text(json.dumps(trimmed, indent=2), encoding="utf-8")

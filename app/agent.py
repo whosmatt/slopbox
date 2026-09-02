@@ -513,6 +513,11 @@ class Run:
             )
 
         version = store.publish_candidate(self.prompt)
+        # The validation render IS the final look, so it doubles as the
+        # gallery thumbnail - no extra browser work to produce one.
+        shot = report.shots.get("desktop")
+        if shot:
+            store.save_shot(version, shot)
         self.published = True
         self.version = version
         bus.publish({"type": "reload", "version": version})

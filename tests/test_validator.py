@@ -110,6 +110,49 @@ async def check_page_wiring(base):
                 "the live page carries %d slopbox stylesheets, expected exactly 1: %s"
                 % (live["ownSheets"], live["styleSheets"])
             )
+
+        # The gallery, and pinning a design from it.
+        gal = await context.new_page()
+        resp = await gal.goto(base + "/gallery", wait_until="load")
+        if resp is None or resp.status != 200:
+            problems.append("/gallery did not return 200")
+        broken = await gal.evaluate(
+            "() => [...document.querySelectorAll('img')]"
+            ".filter(i => i.complete && i.naturalWidth === 0).length"
+        )
+        if broken:
+            problems.append("%d broken thumbnails on /gallery" % broken)
+
+        newest = store.history_entries()
+        if newest:
+            v = newest[0]["version"]
+            pin = await context.new_page()
+            await pin.goto(base + "/?style=%d" % v, wait_until="load")
+            await pin.wait_for_timeout(1500)
+            state = await pin.evaluate(PAGE_WIRING_JS)
+            if state["mode"] != "pinned":
+                problems.append("?style=%d did not pin (mode %r)" % (v, state["mode"]))
+            # It must serve the frozen copy, never the live sheet - otherwise a
+            # publish elsewhere would change the look under a pinned visitor.
+            if any("style.css" in (h or "") for h in state["styleSheets"]):
+                problems.append(
+                    "a pinned page loaded the live stylesheet: %s" % state["styleSheets"]
+                )
+            if not any("/history/%d.css" % v in (h or "") for h in state["styleSheets"]):
+                problems.append(
+                    "a pinned page is missing its frozen stylesheet: %s" % state["styleSheets"]
+                )
+
+        # An unknown design drops the parameter rather than erroring.
+        bogus = await context.new_page()
+        await bogus.goto(base + "/?style=99999999", wait_until="load")
+        await bogus.wait_for_timeout(800)
+        fell_back = await bogus.evaluate(PAGE_WIRING_JS)
+        if fell_back["mode"] != "live":
+            problems.append(
+                "an unknown ?style= did not fall back to the plain page (mode %r)"
+                % fell_back["mode"]
+            )
     finally:
         await context.close()
     return problems
@@ -157,7 +200,7 @@ async def main():
             failures.append("PAGE WIRING: " + w)
             print("  FAIL       %s" % w[:74])
         if not wiring:
-            print("  ok         ?safe=1 stays bare; live page carries exactly one stylesheet")
+            print("  ok         safe stays bare, one live sheet, gallery + pinning behave")
     except Exception as exc:
         print("  skipped    (%s: %s)" % (type(exc).__name__, str(exc)[:60]))
 

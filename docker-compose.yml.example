@@ -25,7 +25,8 @@ services:
       MAX_CSS_BYTES: "100000"
       MAX_PROMPT_CHARS: "600"
 
-      # Published stylesheet versions kept on disk; oldest pruned on every write.
+      # Designs kept on disk for the /gallery page - stylesheet, thumbnail and
+      # prompt each, pruned together. Oldest ages out on every publish.
       HISTORY_KEEP: "20"
 
       # Prompts per IP per window.

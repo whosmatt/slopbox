@@ -101,6 +101,26 @@ forces `html`/`body` back into rendering the same way.
 
 `/?safe=1` always serves the page with no custom CSS at all.
 
+## The gallery
+
+`/gallery` lists the retained designs newest-first, each as the screenshot the
+validator took of it at publish time - so producing thumbnails costs no extra
+browser work. Clicking one opens `/?style=N`, which serves that design's frozen
+stylesheet from `/history/N.css` instead of `/style.css`.
+
+A pinned page deliberately does **not** hot-swap: `restyle()` is inert in
+`pinned` mode, exactly as in safe mode, so the look survives anyone else
+publishing while you read. Drop the parameter and you are back on the live site.
+
+An unknown or aged-out `?style=` redirects to `/` rather than erroring - links
+outlive the ring, and the plain page is always a correct answer. Which card is
+badged *live now* is decided by comparing stylesheet content, not version
+numbers: `reset` and `rollback` bump the counter without writing a history
+entry, so a version comparison badges the wrong design.
+
+Like safe mode, the gallery loads only `base.css`. It is a utility page, so it
+is never subject to whatever the agent last published.
+
 ### Layer 4: CSP
 
 `default-src 'none'` with `img-src 'self' data:`, `font-src 'self'` and
@@ -133,7 +153,12 @@ Disk footprint is bounded by construction, not by a cleanup job:
 - `/data` holds exactly `current.css`, `last_good.css`, `meta.json` and a
   history ring of at most `HISTORY_KEEP` (20) stylesheets, pruned on every
   write. With the 100KB stylesheet cap that is a hard ceiling of ~2MB.
-- Screenshots are passed around as bytes and never touch the filesystem.
+- One thumbnail per retained design (`NNNNNN.jpg`, the validation render reused
+  for the gallery) plus a `history.json` of prompts. Both are pruned in the same
+  sweep as the stylesheets, so all three artefacts age out together - a JPEG can
+  never outlive the design it pictures. At ~50KB each that is ~1MB on top.
+- Screenshots taken *during* a run stay in memory; only the one that got
+  published is written.
 - Chromium is one long-lived instance, not a process per request, with `/tmp` on
   a 256MB tmpfs that is wiped on restart.
 - The SSE replay buffer and the rate-limit table are both size-capped in memory.
@@ -147,7 +172,11 @@ Disk footprint is bounded by construction, not by a cleanup job:
 | `POST /api/prompt` | `{"prompt": "..."}` - rate limited per IP |
 | `GET /events` | SSE stream of agent progress |
 | `GET /api/status` | queue and version state |
-| `POST /admin/reset` | back to bland; needs `X-Admin-Token` |
+| `GET /gallery` | recent designs as thumbnails |
+| `GET /gallery/{n}.jpg` | one design's thumbnail |
+| `GET /history/{n}.css` | one design's frozen stylesheet |
+| `GET /?style={n}` | browse the site wearing design *n* |
+| `POST /admin/reset` | live look back to bland, gallery kept; needs `X-Admin-Token` |
 | `POST /admin/rollback` | restore the previous stylesheet |
 | `GET /preview`, `/candidate.css` | internal, localhost peer only |
 
@@ -179,7 +208,8 @@ The tests are mounted into the container rather than baked into the image.
 
 ```bash
 docker compose exec slopbox python -m tests.test_guard      # sanitiser, 39 cases
-docker compose exec slopbox python -m tests.test_steering   # queue/context, 12 cases
+docker compose exec slopbox python -m tests.test_steering   # queue/context, 29 cases
+docker compose exec slopbox python -m tests.test_store      # history ring, 20 cases
 docker compose exec slopbox python -m tests.test_validator  # browser gate, 20 cases
 ```
 
@@ -199,6 +229,11 @@ stylesheet that could not fit in one response.
 `test_steering` covers the queue: that a prompt arriving too late to be consumed
 becomes its own job instead of being silently dropped, and that a follow-up run
 is told what the previous attempt did so "try again" has a referent.
+
+`test_store` guards the disk ceiling now that the gallery persists images:
+that a stylesheet, its thumbnail and its index row are pruned in one sweep, that
+no thumbnail outlives its stylesheet, that orphans are swept up, and that
+`reset` keeps the archive.
 
 `test_validator` publishes sixteen
 different ways of breaking the page (input hidden, zero-size, off-screen,

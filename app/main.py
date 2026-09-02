@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
+from html import escape
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
@@ -17,6 +19,7 @@ from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     PlainTextResponse,
+    RedirectResponse,
     Response,
     StreamingResponse,
 )
@@ -133,7 +136,7 @@ async def security_headers(request: Request, call_next):
     response = await call_next(request)
     for k, v in NOSNIFF.items():
         response.headers.setdefault(k, v)
-    if request.url.path in ("/", "/preview"):
+    if request.url.path in ("/", "/preview", "/gallery"):
         response.headers["Content-Security-Policy"] = CSP
         # The HTML embeds the current stylesheet version, so a cached copy sends
         # a reloading visitor to a stale /style.css?v=N.
@@ -141,7 +144,7 @@ async def security_headers(request: Request, call_next):
     return response
 
 
-def _page(safe_mode, preview):
+def _page(safe_mode=False, preview=False, pinned=None):
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     if safe_mode:
         sheet = ""
@@ -149,6 +152,12 @@ def _page(safe_mode, preview):
     elif preview:
         sheet = '<link rel="stylesheet" href="/candidate.css">'
         mode = "preview"
+    elif pinned is not None:
+        # A design chosen from the gallery. Deliberately not /style.css, and
+        # app.js refuses to hot-swap in this mode, so the visitor keeps this
+        # look no matter what anyone else publishes meanwhile.
+        sheet = '<link rel="stylesheet" href="/history/%d.css">' % pinned
+        mode = "pinned"
     else:
         v = store.read_meta().get("version", 0)
         sheet = '<link rel="stylesheet" href="/style.css?v=%s">' % v
@@ -159,7 +168,94 @@ def _page(safe_mode, preview):
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     safe = request.query_params.get("safe") in ("1", "true", "yes")
-    return HTMLResponse(_page(safe_mode=safe, preview=False))
+    if safe:
+        return HTMLResponse(_page(safe_mode=True))
+
+    style = request.query_params.get("style")
+    if style is not None:
+        # An unknown or aged-out version simply loses the parameter rather than
+        # erroring - the link may be old, and the plain page is always correct.
+        try:
+            wanted = int(style)
+        except ValueError:
+            wanted = None
+        if wanted is None or store.history_css(wanted) is None:
+            return RedirectResponse("/", status_code=302)
+        return HTMLResponse(_page(pinned=wanted))
+
+    return HTMLResponse(_page())
+
+
+@app.get("/history/{version}.css")
+async def history_css(version: int):
+    css = store.history_css(version)
+    if css is None:
+        raise HTTPException(status_code=404, detail="that design has aged out")
+    return Response(
+        content=css, media_type="text/css", headers={"Cache-Control": "no-store"}
+    )
+
+
+@app.get("/gallery", response_class=HTMLResponse)
+async def gallery():
+    entries = store.history_entries()
+    # Which card is live is decided by content, not by version number: reset and
+    # rollback bump the counter without writing a history entry, so comparing
+    # versions can badge the wrong design (or badge one when the live look is
+    # the bland default and matches nothing at all).
+    live_css = store.current_css()
+    if not entries:
+        items = (
+            '<p id="gal-empty">No designs yet. Ask for one on the '
+            '<a href="/">front page</a>.</p>'
+        )
+    else:
+        cards = []
+        for e in entries:
+            v = e["version"]
+            is_live = store.history_css(v) == live_css
+            label = escape(e["prompt"] or "(no prompt recorded)")
+            when = (
+                datetime.fromtimestamp(e["ts"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+                if e["ts"]
+                else ""
+            )
+            shot = (
+                '<img class="gal-shot" loading="lazy" alt="Screenshot of design %d" '
+                'src="/gallery/%d.jpg">' % (v, v)
+                if e["has_shot"]
+                else '<p class="gal-noshot">no screenshot kept for this one</p>'
+            )
+            cards.append(
+                '<a class="gal-card%s" href="/?style=%d">%s'
+                '<span class="gal-meta"><span class="gal-v">#%d%s%s</span>'
+                '<span class="gal-prompt">%s</span></span></a>'
+                % (
+                    " gal-live" if is_live else "",
+                    v,
+                    shot,
+                    v,
+                    " &middot; live now" if is_live else "",
+                    (" &middot; " + when) if when else "",
+                    label,
+                )
+            )
+        items = '<div id="gal-grid">' + "".join(cards) + "</div>"
+    html = (STATIC_DIR / "gallery.html").read_text(encoding="utf-8")
+    return HTMLResponse(html.replace("<!--GALLERY_ITEMS-->", items))
+
+
+@app.get("/gallery/{version}.jpg")
+async def gallery_shot(version: int):
+    data = store.shot_bytes(version)
+    if data is None:
+        raise HTTPException(status_code=404, detail="no screenshot for that design")
+    return Response(
+        content=data,
+        media_type="image/jpeg",
+        # Immutable per version, so it may be cached hard.
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/preview", response_class=HTMLResponse)
