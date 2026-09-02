@@ -137,14 +137,16 @@ if ENABLE_SKETCH:
         "<script> and <canvas> DO work. It is a separate little document with no "
         "access to this page and no network, so use it for motion and generative "
         "decoration, never for anything the page depends on. It defaults to a "
-        "frame is 900x420 by default and your CSS can size #qb-sketch however you "
-        "like - make it big, a clipped canvas is the usual mistake. Choose where it "
-        "sits with the placement argument: top (default), above-chat, beside-chat "
-        "(roomiest, sits next to the transcript on wide screens) or background "
-        "(fixed behind everything). It is pointer-events:none by default so it "
-        "cannot steal clicks meant for the prompt box - anything interactive like a "
-        "game MUST add #qb-sketch{pointer-events:auto}, and must then stay clear of "
-        "the prompt box. "
+        "frame is 900x420 by default. Do NOT guess a canvas size: the frame gets a "
+        "small helper, so call SLOP.fit(canvas) and it is sized to the frame for you "
+        "and re-fitted whenever the frame changes - guessed sizes are what gets "
+        "clipped. SLOP.width and SLOP.height give the current size. Choose where it "
+        "sits with placement: top (default), above-chat, beside-chat (roomiest, "
+        "sits next to the transcript on wide screens and stays put as it scrolls) or "
+        "background (fixed behind everything). For anything a visitor plays with, "
+        "pass interactive:true - do not try to arrange it in CSS. The frame then "
+        "captures clicks and keys, shows a click-to-play badge, releases on Escape, "
+        "and stops arrow keys scrolling the page. "
     )
 if _STRUCTURE:
     SYSTEM_PROMPT = SYSTEM_PROMPT + chr(10) + chr(10) + _STRUCTURE
@@ -294,6 +296,16 @@ SKETCH_TOOL = {
                     "description": (
                         "A complete little document body - markup, <style> and "
                         "<script> are all fine here. Max %d bytes." % MAX_SKETCH_BYTES
+                    ),
+                },
+                "interactive": {
+                    "type": "boolean",
+                    "description": (
+                        "True if visitors should be able to click or type into it, as a "
+                        "game needs. Frames are click-through by default so they cannot "
+                        "steal clicks meant for the prompt box; set this rather than "
+                        "trying to do it in CSS. Interactive frames get a click-to-play "
+                        "badge and release on Escape."
                     ),
                 },
                 "placement": {
@@ -640,16 +652,21 @@ class Run:
         placement = str(args.get("placement") or "").strip()
         if placement not in ("top", "above-chat", "beside-chat", "background"):
             placement = "top"
+        interactive = bool(args.get("interactive"))
         store.set_candidate_part("sketch", html)
-        store.set_candidate_part("sketchplace", placement)
+        store.set_candidate_part(
+            "sketchplace",
+            json.dumps({"placement": placement, "interactive": interactive}),
+        )
         self.writes += 1
         self._invalidate_screenshots()
         if not html.strip():
             return "Sketch frame removed. Screenshot to see the result.", None
         return (
-            "Sketch accepted (%d bytes), placed %s. It runs sandboxed with no page "
+            "Sketch accepted (%d bytes), placed %s, %s. It runs sandboxed with no page "
             "access and no network. Not live yet - screenshot to see it, then publish."
-            % (len(html), placement)
+            % (len(html), placement,
+               "clickable" if interactive else "click-through (decorative)")
         ), None
 
     async def _tool_screenshot(self, args):

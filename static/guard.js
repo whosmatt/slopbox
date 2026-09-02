@@ -58,6 +58,7 @@
     if (opacity < 0.2) return 'the input field is transparent';
     if (r.width < 60 || r.height < 16) return 'the input field has collapsed to almost nothing';
 
+    var offScreen = false;
     var ix = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
     var iy = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
     if ((ix * iy) / Math.max(1, r.width * r.height) < 0.5) {
@@ -82,9 +83,18 @@
         docTop + r.height > 0 && docTop < docH &&
         docLeft + r.width > 0 && docLeft < docW;
       if (!reachable) return 'the input field has moved off screen';
+      /* Reachable but below the fold. The hit test further down probes the
+         element's centre clamped into the viewport, which for an input 3000px
+         down lands somewhere else entirely and reports whatever happens to be
+         there as "covering" it. Nothing here can hit-test a point that is not
+         rendered without scrolling the page, which this must not do - so trust
+         the reachability answer and stop. */
+      offScreen = true;
     }
 
     if (cs.pointerEvents === 'none') return 'the input field cannot be clicked';
+
+    if (offScreen) return null;
 
     var cx = Math.min(vw - 1, Math.max(1, r.left + r.width / 2));
     var cy = Math.min(vh - 1, Math.max(1, r.top + r.height / 2));

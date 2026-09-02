@@ -69,6 +69,14 @@ focus and accept typed text.
 Two of those deserve their own note, because the obvious implementations produce
 false positives that reject perfectly good designs:
 
+The guard needs the same care and one extra rule: it must never hit-test a point
+that is not on screen. Its probe is the input's centre clamped into the viewport,
+so for an input 3000px below the fold it lands somewhere else entirely and
+reports whatever is there as covering it - which is exactly why the overlay fired
+on a perfectly usable live page. Reachable-but-below-the-fold now stops at the
+reachability answer, since nothing can hit-test an unrendered point without
+scrolling the visitor's page.
+
 - **Reachable, not "in the viewport".** A tall design legitimately puts the box
   below the fold on a short window; that is scrolling, not breakage. The check
   scrolls **vertically only** and re-measures. Deliberately not
@@ -182,6 +190,24 @@ had no way to act on "remove the game". And the sketch frame is
 `pointer-events: none` by default so it can never steal clicks meant for the
 prompt box; anything interactive needs `#qb-sketch{pointer-events:auto}`, at
 which point the validator starts checking it does not cover the input.
+
+Interactive frames opt in through the tool (`interactive: true`), not through
+CSS the agent has to remember - which it reliably forgot, leaving games
+unclickable. The frame then gets `pointer-events: auto`, a click-to-play badge,
+release on Escape, and swallows the arrow keys so they do not scroll the page
+behind it. Every sketch also gets a small `SLOP` helper: `SLOP.fit(canvas)`
+sizes a canvas to the frame at device pixel ratio and re-fits on resize, because
+guessed canvas sizes were what kept getting clipped.
+
+Two layout traps worth remembering, both of which produced spectacular results:
+
+- `beside-chat` must not use `align-items: stretch`, and must keep `#chat`'s
+  `max-height`. Releasing either ties the frame's height to the full transcript,
+  which grew it to 3944px on the live site. The frame is `position: sticky`
+  instead, and heights stay bounded.
+- Layout rules for the frame use three-class selectors, which outrank the
+  agent's own `#qb-sketch { height: … }`. Anything the agent should control -
+  height especially - must simply not be set there.
 
 The sketch frame can be placed: `top` (default), `above-chat`, `beside-chat`
 (the roomiest, sitting next to the transcript on wide screens and stacking on

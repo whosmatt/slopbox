@@ -345,6 +345,12 @@ body.qb-body {
   display: none;
 }
 
+/* Interactive frames opt in through the tool, not through CSS the agent has to
+   remember - which it reliably forgot, leaving games unclickable. */
+#qb-sketch.qb-sketch-live {
+  pointer-events: auto;
+}
+
 #qb-sketch {
   display: block;
   width: 100%;
@@ -383,18 +389,28 @@ body.qb-body {
       "sketch chat"
       "form   form"
       "hint   hint";
-    align-items: stretch;
+    /* NOT stretch: stretching ties the frame's height to the transcript, and a
+       long transcript then drags the frame to thousands of pixels. */
+    align-items: start;
   }
   #qb-main:has(> #qb-sketch.qb-sketch-beside) > #qb-sketch { grid-area: sketch; }
-  #qb-main:has(> #qb-sketch.qb-sketch-beside) > #chat { grid-area: chat; max-height: none; }
   #qb-main:has(> #qb-sketch.qb-sketch-beside) > #prompt-form { grid-area: form; }
   #qb-main:has(> #qb-sketch.qb-sketch-beside) > #qb-hint { grid-area: hint; }
+
+  #qb-main:has(> #qb-sketch.qb-sketch-beside) > #chat {
+    grid-area: chat;
+    /* Bounded and internally scrollable. Releasing this cap was what let the
+       row grow without limit. */
+    max-height: min(70vh, 560px);
+  }
 
   #qb-sketch.qb-sketch-main.qb-sketch-beside {
     width: 100%;
     max-width: none;
-    height: auto;
-    min-height: 340px;
+    /* Height is deliberately left alone here so the agent's own value wins,
+       falling back to the 420px default above. */
+    position: sticky;
+    top: 16px;
   }
 }
 

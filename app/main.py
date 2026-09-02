@@ -7,6 +7,7 @@ goes through the agent, the sanitiser and the browser validator.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 from html import escape
@@ -160,7 +161,12 @@ PLACEMENTS = {
 DEFAULT_PLACEMENT = "top"
 
 
-def _placement_for(kind, version=None):
+def _sketch_meta(kind, version=None):
+    """Placement and interactivity for a sketch.
+
+    Stored as JSON in the same part file, falling back to a bare placement
+    string so sketches written before interactivity existed still load.
+    """
     if kind == "preview":
         raw = store.candidate_part("sketchplace")
     elif kind == "pinned":
@@ -168,7 +174,20 @@ def _placement_for(kind, version=None):
     else:
         raw = store.current_part("sketchplace")
     raw = (raw or "").strip()
-    return raw if raw in PLACEMENTS else DEFAULT_PLACEMENT
+
+    placement, interactive = DEFAULT_PLACEMENT, False
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+            placement = data.get("placement") or DEFAULT_PLACEMENT
+            interactive = bool(data.get("interactive"))
+        except ValueError:
+            pass
+    elif raw:
+        placement = raw
+    if placement not in PLACEMENTS:
+        placement = DEFAULT_PLACEMENT
+    return {"placement": placement, "interactive": interactive}
 
 
 def _parts_for(kind, version=None):
@@ -178,7 +197,7 @@ def _parts_for(kind, version=None):
     the fixed page and base.css.
     """
     if kind == "safe" or not (ENABLE_HTML or ENABLE_SKETCH):
-        return "", "", ""
+        return "", "", "", {"placement": DEFAULT_PLACEMENT, "interactive": False}
     if kind == "preview":
         decor = store.candidate_part("decor")
         sketch = store.candidate_part("sketch")
@@ -194,17 +213,21 @@ def _parts_for(kind, version=None):
 
     decor_html = decor if (ENABLE_HTML and decor.strip()) else ""
     frame = ""
+    meta = _sketch_meta(kind, version)
+    placement = meta["placement"]
     if ENABLE_SKETCH and sketch.strip():
-        placement = _placement_for(kind, version)
         # sandbox WITHOUT allow-same-origin: the frame gets an opaque origin, so
         # its script cannot reach this document, its storage or its cookies.
         # Adding allow-same-origin here would undo the entire containment.
+        classes = PLACEMENTS[placement]
+        if meta["interactive"]:
+            classes += " qb-sketch-live"
         frame = (
-            '<iframe id="qb-sketch" class="%s" title="Decorative sketch" '
+            '<iframe id="qb-sketch" class="%s" title="Interactive sketch" '
             'sandbox="allow-scripts" referrerpolicy="no-referrer" src="%s"></iframe>'
-            % (PLACEMENTS[placement], src)
+            % (classes, src)
         )
-    return decor_html, frame, placement if frame else ""
+    return decor_html, frame, (placement if frame else ""), meta
 
 
 def _page(safe_mode=False, preview=False, pinned=None):
@@ -226,7 +249,7 @@ def _page(safe_mode=False, preview=False, pinned=None):
         sheet = '<link rel="stylesheet" href="/style.css?v=%s">' % v
         mode = "live"
     fonts = '<link rel="stylesheet" href="/fonts.css">' if ENABLE_FONTS else ""
-    decor, frame, placement = _parts_for(mode, pinned)
+    decor, frame, placement, _meta = _parts_for(mode, pinned)
     top = frame if placement in ("top", "background") else ""
     main = frame if placement in ("above-chat", "beside-chat") else ""
     return (
@@ -358,11 +381,102 @@ async def candidate_css(request: Request):
     )
 
 
+SKETCH_HARNESS = """
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent}
+#slop-badge{position:fixed;left:8px;bottom:8px;z-index:2147483647;font:12px/1.4 system-ui,
+ sans-serif;background:rgba(0,0,0,.62);color:#fff;padding:4px 9px;border-radius:999px;
+ pointer-events:none;opacity:.9;transition:opacity .2s}
+#slop-badge[hidden]{display:none}
+</style>
+<script>
+/* Small harness every sketch gets for free. It exists because two things went
+   wrong repeatedly on their own: canvases were sized to a guessed number and got
+   clipped, and keyboard games could never be played because the frame never held
+   focus (and arrow keys scrolled the page behind it instead). */
+(function () {
+  var interactive = false, captured = false, badge = null, resizers = [];
+
+  function size() { return { w: window.innerWidth, h: window.innerHeight }; }
+
+  var SLOP = {
+    get width() { return window.innerWidth; },
+    get height() { return window.innerHeight; },
+    /* Size a canvas to the frame, accounting for device pixel ratio, and keep
+       it sized as the frame changes. Draw in CSS pixels; the scaling is done. */
+    fit: function (canvas, onResize) {
+      function apply() {
+        var d = size(), ratio = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.round(d.w * ratio));
+        canvas.height = Math.max(1, Math.round(d.h * ratio));
+        canvas.style.width = d.w + 'px';
+        canvas.style.height = d.h + 'px';
+        var ctx = canvas.getContext('2d');
+        if (ctx && ctx.setTransform) ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        if (onResize) onResize(d.w, d.h);
+      }
+      apply();
+      resizers.push(apply);
+      return size();
+    },
+    onResize: function (fn) { resizers.push(function () { var d = size(); fn(d.w, d.h); }); },
+    get captured() { return captured; }
+  };
+
+  window.addEventListener('resize', function () {
+    for (var i = 0; i < resizers.length; i++) { try { resizers[i](); } catch (e) {} }
+  });
+
+  function setBadge(text, hide) {
+    if (!badge) return;
+    badge.textContent = text;
+    badge.hidden = !!hide;
+  }
+
+  function capture() {
+    if (!interactive || captured) return;
+    captured = true;
+    try { window.focus(); } catch (e) {}
+    setBadge('Esc to exit');
+  }
+  function release() {
+    if (!captured) return;
+    captured = false;
+    setBadge('click to play');
+    try { window.blur(); parent.focus(); } catch (e) {}
+  }
+
+  window.SLOP = SLOP;
+
+  document.addEventListener('DOMContentLoaded', function () {
+    interactive = document.body.getAttribute('data-interactive') === '1';
+    if (!interactive) return;
+    badge = document.createElement('div');
+    badge.id = 'slop-badge';
+    badge.textContent = 'click to play';
+    document.body.appendChild(badge);
+
+    document.addEventListener('mousedown', capture);
+    document.addEventListener('touchstart', capture, { passive: true });
+    window.addEventListener('blur', release);
+    window.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { release(); return; }
+      /* While playing, the usual game keys must not scroll the page behind
+         the frame. */
+      if (captured && [' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+                       'PageUp', 'PageDown', 'Home', 'End'].indexOf(e.key) !== -1) {
+        e.preventDefault();
+      }
+    });
+  });
+})();
+</script>
+"""
+
 SKETCH_SKELETON = (
-    "<!doctype html><html><head><meta charset=\"utf-8\">"
-    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-    "<style>html,body{margin:0;padding:0;overflow:hidden;background:transparent}</style>"
-    "</head><body>%s</body></html>"
+    '<!doctype html><html><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    "%s</head><body data-interactive=\"%s\">%s</body></html>"
 )
 
 # The sketch is contained by origin, not by sanitising its script: an opaque
@@ -402,8 +516,11 @@ async def sketch_html(request: Request):
             body = ""
     if not body.strip():
         raise HTTPException(status_code=404, detail="no sketch")
+    kind = "preview" if request.query_params.get("preview") else (
+        "live" if which == "live" else "pinned")
+    meta = _sketch_meta(kind, None if kind != "pinned" else int(which))
     return HTMLResponse(
-        SKETCH_SKELETON % body,
+        SKETCH_SKELETON % (SKETCH_HARNESS, "1" if meta.get("interactive") else "0", body),
         headers={"Content-Security-Policy": SKETCH_CSP, "Cache-Control": "no-store"},
     )
 
@@ -496,14 +613,16 @@ async def api_design():
     Publishing used to swap only /style.css, so decoration and the sketch frame
     appeared, changed or vanished only on a manual reload.
     """
-    decor, frame, placement = _parts_for("live")
+    decor, frame, placement, sketch_meta = _parts_for("live")
     meta = store.read_meta()
     return {
         "version": meta.get("version", 0),
         "decor": decor,
         "sketch": bool(frame),
         "placement": placement,
-        "sketchClass": PLACEMENTS.get(placement, ""),
+        "sketchClass": (PLACEMENTS.get(placement, "")
+                        + (" qb-sketch-live" if sketch_meta["interactive"] else "")),
+        "interactive": sketch_meta["interactive"],
         "sketchSrc": "/sketch.html?v=live",
     }
 
