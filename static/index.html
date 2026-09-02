@@ -7,10 +7,14 @@
 <!-- base.css is immutable and always loads first; the agent's stylesheet
      loads after it and may override anything here. -->
 <link rel="stylesheet" href="/base.css">
+<!--FONTS_CSS-->
 <!--CUSTOM_STYLE-->
 </head>
 <body class="qb-body">
 <div id="qb-root">
+  <!-- Filled by the agent with inert markup; empty unless it wrote some. -->
+  <div id="qb-decor"><!--DECOR--></div>
+  <!--SKETCH-->
   <header id="qb-header">
     <h1 id="qb-title">slopbox</h1>
     <p id="qb-tagline">Ask an incompetent AI agent to restyle this page.</p>

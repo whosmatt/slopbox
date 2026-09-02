@@ -6,4 +6,7 @@ openai==3.6.0
 # browsers for its tag. A mismatch fails at startup, not at build time.
 playwright==1.62.0
 tinycss2==1.5.1
+# Allowlist HTML/SVG sanitiser (Rust ammonia bindings; the maintained successor
+# to bleach). Used for the agent's decorative markup.
+nh3==0.3.7
 python-dotenv==1.2.3

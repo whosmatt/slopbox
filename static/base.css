@@ -330,3 +330,28 @@ body.qb-body {
 }
 
 #gal-empty { font-size: 14px; color: #666666; }
+
+/* ---------------------------------------------------------------------------
+   Agent-supplied decoration. Both default to pointer-events:none so they can
+   never swallow a click meant for the prompt box; the agent may override that,
+   and the validator then checks the input is still hit-testable.
+   --------------------------------------------------------------------------- */
+
+#qb-decor {
+  pointer-events: none;
+}
+
+#qb-decor:empty {
+  display: none;
+}
+
+#qb-sketch {
+  display: block;
+  width: 100%;
+  max-width: 620px;
+  height: 200px;
+  margin: 0 auto;
+  border: 0;
+  background: transparent;
+  pointer-events: none;
+}

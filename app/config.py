@@ -67,6 +67,29 @@ def note_server_port(port):
 def self_url():
     return SELF_URL_OVERRIDE or ("http://127.0.0.1:%d" % (_observed_port or PORT))
 
+# --- capability flags ------------------------------------------------------
+# Everything the agent can do beyond plain CSS is switchable, so a capability
+# that turns out to invite abuse can be turned off without a rollback. All
+# default on; set any to 0/false/no to revoke it.
+def _flag(name, default=True):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+# Locally hosted font files, referenced with @font-face url("/fonts/...").
+ENABLE_FONTS = _flag("ENABLE_FONTS")
+# Curated local textures and patterns under /assets/...
+ENABLE_ASSETS = _flag("ENABLE_ASSETS")
+# Inert decorative markup in the #qb-decor mount point.
+ENABLE_HTML = _flag("ENABLE_HTML")
+# A scripted document inside a null-origin sandboxed iframe.
+ENABLE_SKETCH = _flag("ENABLE_SKETCH")
+
+MAX_DECOR_BYTES = int(os.getenv("MAX_DECOR_BYTES", "20000"))
+MAX_SKETCH_BYTES = int(os.getenv("MAX_SKETCH_BYTES", "20000"))
+
 # Viewports the validator must pass. (label, width, height)
 VIEWPORTS = [("desktop", 1280, 800), ("mobile", 390, 844)]
 

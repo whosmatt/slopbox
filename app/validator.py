@@ -83,9 +83,21 @@ CHECK_JS = r"""
 
   if (cs.pointerEvents === 'none') problems.push('the prompt input has pointer-events:none so it cannot be clicked');
 
-  // Note: an ANCESTOR coming back here is a failure, not a pass - it means the
-  // ancestor's own background or ::before/::after is painted over the input.
+  // Decoration defaults to pointer-events:none, which would let markup painted
+  // straight over the input stay hit-testable - invisible to a human, perfect to
+  // a machine. Forcing it back on turns "visually covering" into "hit-testable
+  // covering", which the check below already understands, and it still respects
+  // paint order, so decoration sitting behind the input is not punished.
+  const forced = [];
+  document.querySelectorAll('#qb-decor, #qb-decor *, #qb-sketch').forEach((el) => {
+    if (getComputedStyle(el).pointerEvents === 'none') {
+      el.style.setProperty('pointer-events', 'auto', 'important');
+      forced.push(el);
+    }
+  });
+
   const hit = document.elementFromPoint(cx, cy);
+  forced.forEach((el) => el.style.removeProperty('pointer-events'));
   if (!hit) {
     problems.push('nothing is hit-testable at the centre of the prompt input');
   } else if (hit !== el && !el.contains(hit)) {

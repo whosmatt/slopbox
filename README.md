@@ -121,6 +121,60 @@ entry, so a version comparison badges the wrong design.
 Like safe mode, the gallery loads only `base.css`. It is a utility page, so it
 is never subject to whatever the agent last published.
 
+## What the agent can do beyond CSS
+
+Every capability below is switchable, so one that invites abuse can be revoked
+without a rollback. All default on; set the flag to `0` to take it away, which
+removes the tool, drops it from the system prompt, and closes the route.
+
+| Flag | Gives the agent |
+| --- | --- |
+| `ENABLE_FONTS` | four locally served font families (`"Slop Sans/Serif/Mono/Narrow"`) |
+| `ENABLE_ASSETS` | twelve tileable patterns via `url(/assets/NAME)` |
+| `ENABLE_HTML` | inert markup and inline SVG in `#qb-decor`, via `write_decor` |
+| `ENABLE_SKETCH` | a sandboxed scripted frame `#qb-sketch`, via `write_sketch` |
+
+**Fonts** are the Liberation faces Debian already installs for Chromium, served
+from `/fonts/`. Serving them matters for honesty as much as looks: a *system*
+font renders in the validator's browser but falls back to something else in a
+visitor's, so the model's screenshot would show a typeface nobody else sees. The
+`@font-face` block is written by us, which is why `@font-face` can stay banned in
+the sanitiser - the agent never gets to point a font `src` anywhere.
+
+**Decor** (`app/html_guard.py`) is the same discipline as the CSS guard: parse
+with a real parser (`nh3`), keep only an allowlist, emit the parsed tree. Denied:
+script, event handlers, links, forms, images, iframes, style attributes, and the
+SVG escape hatches (`foreignObject`, `use`, `animate`). Two subtler rules matter
+more than the tag list:
+
+- `id` is stripped everywhere it is not structurally required, and where it is
+  (SVG gradients), the value must be a simple name outside the app's namespace.
+  An element answering to `prompt-input` would otherwise shadow the real one for
+  `getElementById`, since the first match in document order wins - quietly
+  disarming the guard and the validator.
+- `url(...)` in paint attributes may only reference a fragment in the same
+  markup, so decoration cannot become an outbound request.
+
+**Sketches** are contained by origin, not by sanitising their script - which is
+the only honest way to allow JS here. The frame is `sandbox="allow-scripts"`
+*without* `allow-same-origin`, so it gets an opaque origin, plus its own
+`default-src 'none'; connect-src 'none'` policy. Verified against a sketch that
+actively tries to escape: parent DOM, `top.location`, cookies, `localStorage` and
+`document.getElementById('slopbox-guard').remove()` all raise `SecurityError`,
+and `origin` reads `"null"`.
+
+That distinction is the whole reason JS in the *main* document stays off the
+table: script there could delete the guard's shadow host and outlast the
+validator's sampling window, which are the two mechanisms everything else rests
+on.
+
+One consequence worth knowing: decoration defaults to `pointer-events: none`, so
+markup painted over the input would have stayed hit-testable - invisible to a
+human, perfect to a machine. The validator now forces pointer events back on for
+`#qb-decor` and `#qb-sketch` before hit-testing, which turns "visually covering"
+into "hit-testable covering" while still respecting paint order, so decoration
+placed *behind* the input is not punished.
+
 ### Layer 4: CSP
 
 `default-src 'none'` with `img-src 'self' data:`, `font-src 'self'` and
@@ -153,6 +207,9 @@ Disk footprint is bounded by construction, not by a cleanup job:
 - `/data` holds exactly `current.css`, `last_good.css`, `meta.json` and a
   history ring of at most `HISTORY_KEEP` (20) stylesheets, pruned on every
   write. With the 100KB stylesheet cap that is a hard ceiling of ~2MB.
+- A design is now a stylesheet plus optional markup and sketch, so a retained
+  version can be up to four files. They are pruned in one sweep keyed on the
+  version number, so no part can outlive the design it belongs to.
 - One thumbnail per retained design (`NNNNNN.jpg`, the validation render reused
   for the gallery) plus a `history.json` of prompts. Both are pruned in the same
   sweep as the stylesheets, so all three artefacts age out together - a JPEG can
@@ -172,6 +229,9 @@ Disk footprint is bounded by construction, not by a cleanup job:
 | `POST /api/prompt` | `{"prompt": "..."}` - rate limited per IP |
 | `GET /events` | SSE stream of agent progress |
 | `GET /api/status` | queue and version state |
+| `GET /fonts.css`, `/fonts/{file}` | locally served font faces |
+| `GET /assets/{name}` | built-in tileable patterns |
+| `GET /sketch.html` | the sandboxed frame's document |
 | `GET /gallery` | recent designs as thumbnails |
 | `GET /gallery/{n}.jpg` | one design's thumbnail |
 | `GET /history/{n}.css` | one design's frozen stylesheet |
@@ -210,6 +270,7 @@ The tests are mounted into the container rather than baked into the image.
 docker compose exec slopbox python -m tests.test_guard      # sanitiser, 39 cases
 docker compose exec slopbox python -m tests.test_steering   # queue/context, 29 cases
 docker compose exec slopbox python -m tests.test_store      # history ring, 20 cases
+docker compose exec slopbox python -m tests.test_decor      # decor sanitiser, 27 cases
 docker compose exec slopbox python -m tests.test_validator  # browser gate, 20 cases
 ```
 
@@ -234,6 +295,12 @@ is told what the previous attempt did so "try again" has a referent.
 that a stylesheet, its thumbnail and its index row are pruned in one sweep, that
 no thumbnail outlives its stylesheet, that orphans are swept up, and that
 `reset` keeps the archive.
+
+`test_decor` fires the markup attacks that matter for a shared page - ids and
+classes impersonating the app's own elements, `javascript:` and remote paint
+references, script and handler text, oversized input - and asserts that mixing
+something dangerous in with something harmless keeps the latter and drops the
+former.
 
 `test_validator` publishes sixteen
 different ways of breaking the page (input hidden, zero-size, off-screen,

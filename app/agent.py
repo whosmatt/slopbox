@@ -17,8 +17,14 @@ import time
 
 from openai import AsyncOpenAI
 
-from . import bus, store
+from . import bus, resources, store
 from .config import (
+    ENABLE_ASSETS,
+    ENABLE_FONTS,
+    ENABLE_HTML,
+    ENABLE_SKETCH,
+    MAX_DECOR_BYTES,
+    MAX_SKETCH_BYTES,
     MAX_CONTEXT_CHARS,
     MAX_CSS_BYTES,
     MAX_STEPS,
@@ -30,6 +36,7 @@ from .config import (
     self_url,
 )
 from .css_guard import sanitize
+from .html_guard import sanitize_decor
 from .validator import POOL
 
 _client = None
@@ -113,6 +120,34 @@ visitor sees it live. When publish succeeds, call finish immediately."""
 # that cannot fit in one response and gets cut off mid-string - which used to
 # poison the whole run.
 SAFE_CSS_CHARS = max(4000, int(MAX_TOKENS * 2.2))
+
+_STRUCTURE = ""
+if ENABLE_HTML:
+    _STRUCTURE += (
+        "DECORATIVE MARKUP: #qb-decor sits at the top of #qb-root and is yours to "
+        "fill with write_decor. Inert structure only - plain tags and inline SVG "
+        "(shapes, gradients, filters), with class attributes for your CSS to target. "
+        "No script, links, forms, images, iframes or style attributes, and no ids or "
+        "classes starting qb-, gal-, msg, slopbox, prompt- or chat. Inline SVG is the "
+        "strongest thing you have here: real shapes, blobs, arcs and noise filters "
+        "that CSS cannot draw. It defaults to pointer-events:none. "
+    )
+if ENABLE_SKETCH:
+    _STRUCTURE += (
+        "SKETCH FRAME: write_sketch fills #qb-sketch, a sandboxed iframe where "
+        "<script> and <canvas> DO work. It is a separate little document with no "
+        "access to this page and no network, so use it for motion and generative "
+        "decoration, never for anything the page depends on. It defaults to a "
+        "620x200 block, pointer-events:none, and your CSS can move or resize it. "
+    )
+if _STRUCTURE:
+    SYSTEM_PROMPT = SYSTEM_PROMPT + chr(10) + chr(10) + _STRUCTURE
+
+_RESOURCES = resources.prompt_section(ENABLE_FONTS, ENABLE_ASSETS)
+if _RESOURCES:
+    SYSTEM_PROMPT = SYSTEM_PROMPT + """
+
+""" + _RESOURCES
 
 SYSTEM_PROMPT = SYSTEM_PROMPT + """
 
@@ -203,6 +238,64 @@ TOOLS = [
         },
     },
 ]
+
+DECOR_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "write_decor",
+        "description": (
+            "Replace the decorative markup inside #qb-decor. Inert HTML and inline "
+            "SVG only - no script, links, forms, images or style attributes, and no "
+            "ids or classes in the page's own namespace. Pass an empty string to "
+            "remove it. Not live until you publish."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "html": {
+                    "type": "string",
+                    "description": "The complete markup for #qb-decor. Max %d bytes."
+                    % MAX_DECOR_BYTES,
+                }
+            },
+            "required": ["html"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+SKETCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "write_sketch",
+        "description": (
+            "Replace the contents of the sandboxed sketch frame (#qb-sketch): a tiny "
+            "self-contained document where script IS allowed, for canvas or animated "
+            "decoration. It runs with no access to this page and no network, so it "
+            "cannot read or change anything outside its own box. Pass an empty string "
+            "to remove it. Not live until you publish."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "html": {
+                    "type": "string",
+                    "description": (
+                        "A complete little document body - markup, <style> and "
+                        "<script> are all fine here. Max %d bytes." % MAX_SKETCH_BYTES
+                    ),
+                }
+            },
+            "required": ["html"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+if ENABLE_HTML:
+    TOOLS.append(DECOR_TOOL)
+if ENABLE_SKETCH:
+    TOOLS.append(SKETCH_TOOL)
 
 IMAGE_PLACEHOLDER = "[earlier screenshot dropped to save context]"
 STALE_IMAGE = (
@@ -463,6 +556,41 @@ class Run:
             )
         ), None
 
+    async def _tool_write_decor(self, args):
+        result = sanitize_decor(args.get("html"))
+        if not result.ok:
+            return "REJECTED: " + result.message + ". Fix and call write_decor again.", None
+        store.set_candidate_part("decor", result.html)
+        self.writes += 1
+        self._invalidate_screenshots()
+        if not result.html.strip():
+            return "Decorative markup removed. Screenshot to see the result.", None
+        return (
+            "Decor accepted (%d bytes). %sNot live yet, and any earlier screenshot is "
+            "out of date - screenshot to see it."
+            % (len(result.html), (result.note + ". ") if result.note else "")
+        ), None
+
+    async def _tool_write_sketch(self, args):
+        html = args.get("html")
+        if not isinstance(html, str):
+            return "Rejected: 'html' must be a string.", None
+        if len(html.encode("utf-8")) > MAX_SKETCH_BYTES:
+            return (
+                "Rejected: sketch is %d bytes, limit %d. Make it smaller."
+                % (len(html.encode("utf-8")), MAX_SKETCH_BYTES)
+            ), None
+        store.set_candidate_part("sketch", html)
+        self.writes += 1
+        self._invalidate_screenshots()
+        if not html.strip():
+            return "Sketch frame removed. Screenshot to see the result.", None
+        return (
+            "Sketch accepted (%d bytes). It runs sandboxed with no page access and no "
+            "network. Not live yet - screenshot to see it, then publish."
+            % len(html)
+        ), None
+
     async def _tool_screenshot(self, args):
         if not store.has_candidate():
             return "No candidate stylesheet yet - call write_css first.", None
@@ -537,6 +665,8 @@ class Run:
             "screenshot": self._tool_screenshot,
             "publish": self._tool_publish,
             "finish": self._tool_finish,
+            "write_decor": self._tool_write_decor,
+            "write_sketch": self._tool_write_sketch,
         }.get(name)
         if handler is None:
             return "Unknown tool: " + str(name), None

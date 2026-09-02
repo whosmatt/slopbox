@@ -7,6 +7,7 @@ here grows without limit, so the container never accumulates garbage.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,11 @@ from .config import DATA_DIR, HISTORY_KEEP
 
 CURRENT = DATA_DIR / "current.css"
 CANDIDATE = DATA_DIR / "candidate.css"
+
+# A design is no longer just a stylesheet: it can also carry decorative markup
+# and a sandboxed sketch. All parts are versioned together, otherwise pinning an
+# old design from the gallery would pair its CSS with someone else's markup.
+PARTS = {"css": ".css", "decor": ".decor.html", "sketch": ".sketch.html"}
 LAST_GOOD = DATA_DIR / "last_good.css"
 HISTORY_DIR = DATA_DIR / "history"
 META = DATA_DIR / "meta.json"
@@ -38,8 +44,9 @@ def init():
             LAST_GOOD.write_text(CURRENT.read_text(encoding="utf-8"), encoding="utf-8")
         if not META.exists():
             _write_meta({"version": 0, "prompt": "", "updated": 0.0, "publishes": 0})
-        # A candidate left over from a crashed run is meaningless; drop it.
-        CANDIDATE.unlink(missing_ok=True)
+        # Candidates left over from a crashed run are meaningless; drop them.
+        for part in PARTS:
+            _part_file(part, "candidate").unlink(missing_ok=True)
     _prune_history()
 
 
@@ -71,6 +78,47 @@ def candidate_css():
             return current_css()
 
 
+def _part_file(part, kind, version=None):
+    suffix = PARTS[part]
+    if kind == "current":
+        return DATA_DIR / ("current" + suffix)
+    if kind == "candidate":
+        return DATA_DIR / ("candidate" + suffix)
+    return HISTORY_DIR / (("%06d" % version) + suffix)
+
+
+def _read(path, default=""):
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return default
+
+
+def current_part(part):
+    with _lock:
+        return _read(_part_file(part, "current"))
+
+
+def candidate_part(part):
+    """The pending value, falling back to what is live so an untouched part
+    carries over instead of vanishing when another part is rewritten."""
+    with _lock:
+        path = _part_file(part, "candidate")
+        return _read(path) if path.exists() else current_part(part)
+
+
+def set_candidate_part(part, text):
+    with _lock:
+        _part_file(part, "candidate").write_text(text, encoding="utf-8")
+
+
+def history_part(part, version):
+    try:
+        return _read(_part_file(part, "history", int(version)), default="")
+    except (TypeError, ValueError):
+        return ""
+
+
 def has_candidate():
     return CANDIDATE.exists()
 
@@ -82,7 +130,8 @@ def set_candidate(css):
 
 def clear_candidate():
     with _lock:
-        CANDIDATE.unlink(missing_ok=True)
+        for part in PARTS:
+            _part_file(part, "candidate").unlink(missing_ok=True)
 
 
 def publish_candidate(prompt):
@@ -99,8 +148,18 @@ def publish_candidate(prompt):
         meta["updated"] = time.time()
         _write_meta(meta)
         _snapshot(meta["version"], css)
+        for part in PARTS:
+            if part == "css":
+                continue
+            text = candidate_part(part)
+            _part_file(part, "current").write_text(text, encoding="utf-8")
+            if text.strip():
+                _part_file(part, "history", meta["version"]).write_text(
+                    text, encoding="utf-8"
+                )
         _record_history(meta["version"], prompt)
-        CANDIDATE.unlink(missing_ok=True)
+        for part in PARTS:
+            _part_file(part, "candidate").unlink(missing_ok=True)
         return meta["version"]
 
 
@@ -132,6 +191,9 @@ def reset():
     with _lock:
         LAST_GOOD.write_text(SEED_CSS, encoding="utf-8")
         CURRENT.write_text(SEED_CSS, encoding="utf-8")
+        for part in PARTS:
+            if part != "css":
+                _part_file(part, "current").write_text("", encoding="utf-8")
         meta = read_meta()
         meta["version"] = int(meta.get("version", 0)) + 1
         meta["prompt"] = "(reset)"
@@ -229,20 +291,16 @@ def history_entries():
 def _prune_history():
     versions = _versions_on_disk()
     keep = set(versions[-HISTORY_KEEP:]) if len(versions) > HISTORY_KEEP else set(versions)
-    for v in versions:
-        if v not in keep:
-            (HISTORY_DIR / ("%06d.css" % v)).unlink(missing_ok=True)
-            (HISTORY_DIR / ("%06d.jpg" % v)).unlink(missing_ok=True)
-    # Images whose stylesheet has aged out, and index rows for both.
+    # One sweep over everything, so a design's stylesheet, markup, sketch and
+    # thumbnail always age out together and no orphan can outlive the ring.
     try:
-        for f in HISTORY_DIR.glob("*.jpg"):
-            try:
-                if int(f.stem) not in keep:
-                    f.unlink(missing_ok=True)
-            except ValueError:
-                f.unlink(missing_ok=True)
+        files = list(HISTORY_DIR.iterdir())
     except FileNotFoundError:
-        pass
+        files = []
+    for f in files:
+        match = re.match(r"^(\d{6,})\.", f.name)
+        if match is None or int(match.group(1)) not in keep:
+            f.unlink(missing_ok=True)
     index = _read_index()
     trimmed = {k: v for k, v in index.items() if k.isdigit() and int(k) in keep}
     if trimmed != index:

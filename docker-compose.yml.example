@@ -33,6 +33,16 @@ services:
       RATE_LIMIT_COUNT: "5"
       RATE_LIMIT_WINDOW_SEC: "120"
 
+      # What the agent may do beyond plain CSS. Setting one to 0 removes its
+      # tool, drops it from the system prompt and closes its route, so a
+      # capability that invites abuse can be revoked without a rollback.
+      ENABLE_FONTS: "1"     # locally served font families
+      ENABLE_ASSETS: "1"    # built-in tileable patterns via url(/assets/NAME)
+      ENABLE_HTML: "1"      # inert markup + inline SVG in #qb-decor
+      ENABLE_SKETCH: "1"    # scripted document in a null-origin sandboxed iframe
+      MAX_DECOR_BYTES: "20000"
+      MAX_SKETCH_BYTES: "20000"
+
       # Match to subnet when using a reverse proxy or leave empty
       TRUSTED_PROXIES: "172.28.0.1"
     volumes:

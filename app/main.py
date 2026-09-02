@@ -24,9 +24,13 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
-from . import bus, store
+from . import bus, resources, store
 from .config import (
     ADMIN_TOKEN,
+    ENABLE_ASSETS,
+    ENABLE_FONTS,
+    ENABLE_HTML,
+    ENABLE_SKETCH,
     QWEN_API_KEY,
     MAX_PROMPT_CHARS,
     RATE_LIMIT_COUNT,
@@ -118,6 +122,7 @@ CSP = (
     "script-src 'self'; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; "
+    "frame-src 'self'; "
     "font-src 'self'; "
     "connect-src 'self'; "
     "form-action 'none'; "
@@ -144,6 +149,40 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+def _parts_for(kind, version=None):
+    """The decor markup and sketch frame that belong with a given stylesheet.
+
+    Safe mode gets neither: it is the guaranteed-plain view, so it shows only
+    the fixed page and base.css.
+    """
+    if kind == "safe" or not (ENABLE_HTML or ENABLE_SKETCH):
+        return "", ""
+    if kind == "preview":
+        decor = store.candidate_part("decor")
+        sketch = store.candidate_part("sketch")
+        src = "/sketch.html?preview=1"
+    elif kind == "pinned":
+        decor = store.history_part("decor", version)
+        sketch = store.history_part("sketch", version)
+        src = "/sketch.html?v=%d" % version
+    else:
+        decor = store.current_part("decor")
+        sketch = store.current_part("sketch")
+        src = "/sketch.html?v=live"
+
+    decor_html = decor if (ENABLE_HTML and decor.strip()) else ""
+    frame = ""
+    if ENABLE_SKETCH and sketch.strip():
+        # sandbox WITHOUT allow-same-origin: the frame gets an opaque origin, so
+        # its script cannot reach this document, its storage or its cookies.
+        # Adding allow-same-origin here would undo the entire containment.
+        frame = (
+            '<iframe id="qb-sketch" title="Decorative sketch" sandbox="allow-scripts" '
+            'referrerpolicy="no-referrer" loading="lazy" src="%s"></iframe>' % src
+        )
+    return decor_html, frame
+
+
 def _page(safe_mode=False, preview=False, pinned=None):
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     if safe_mode:
@@ -162,7 +201,15 @@ def _page(safe_mode=False, preview=False, pinned=None):
         v = store.read_meta().get("version", 0)
         sheet = '<link rel="stylesheet" href="/style.css?v=%s">' % v
         mode = "live"
-    return html.replace("<!--CUSTOM_STYLE-->", sheet).replace("{{MODE}}", mode)
+    fonts = '<link rel="stylesheet" href="/fonts.css">' if ENABLE_FONTS else ""
+    decor, frame = _parts_for(mode, pinned)
+    return (
+        html.replace("<!--FONTS_CSS-->", fonts)
+        .replace("<!--CUSTOM_STYLE-->", sheet)
+        .replace("<!--DECOR-->", decor)
+        .replace("<!--SKETCH-->", frame)
+        .replace("{{MODE}}", mode)
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -281,6 +328,96 @@ async def candidate_css(request: Request):
         content=store.candidate_css(),
         media_type="text/css",
         headers={"Cache-Control": "no-store"},
+    )
+
+
+SKETCH_SKELETON = (
+    "<!doctype html><html><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<style>html,body{margin:0;padding:0;overflow:hidden;background:transparent}</style>"
+    "</head><body>%s</body></html>"
+)
+
+# The sketch is contained by origin, not by sanitising its script: an opaque
+# origin plus this policy means it can render and animate but cannot reach the
+# page, storage, or the network. frame-ancestors keeps it from being embedded
+# anywhere but here.
+SKETCH_CSP = (
+    "default-src 'none'; "
+    "script-src 'unsafe-inline'; "
+    "style-src 'unsafe-inline'; "
+    "img-src data:; "
+    "connect-src 'none'; "
+    "form-action 'none'; "
+    "base-uri 'none'; "
+    "frame-ancestors 'self'"
+)
+
+
+@app.get("/sketch.html", response_class=HTMLResponse)
+async def sketch_html(request: Request):
+    if not ENABLE_SKETCH:
+        raise HTTPException(status_code=404, detail="sketches are disabled")
+    which = request.query_params.get("v", "live")
+    if request.query_params.get("preview"):
+        _require_local(request)
+        body = store.candidate_part("sketch")
+    elif which == "live":
+        body = store.current_part("sketch")
+    else:
+        try:
+            body = store.history_part("sketch", int(which))
+        except ValueError:
+            body = ""
+    if not body.strip():
+        raise HTTPException(status_code=404, detail="no sketch")
+    return HTMLResponse(
+        SKETCH_SKELETON % body,
+        headers={"Content-Security-Policy": SKETCH_CSP, "Cache-Control": "no-store"},
+    )
+
+
+@app.get("/fonts.css")
+async def fonts_css():
+    """@font-face declarations, written by us rather than the agent.
+
+    Handing the families over ready-made means @font-face can stay banned in the
+    sanitiser: the agent never gets to point a font `src` anywhere.
+    """
+    if not ENABLE_FONTS:
+        return Response(content="/* fonts disabled */", media_type="text/css")
+    return Response(
+        content=resources.font_face_css(),
+        media_type="text/css",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/fonts/{filename}")
+async def font_file(filename: str):
+    if not ENABLE_FONTS:
+        raise HTTPException(status_code=404, detail="fonts are disabled")
+    path = resources.FONT_FILES.get(filename)
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="unknown font")
+    return FileResponse(
+        path,
+        media_type="font/ttf",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
+
+
+@app.get("/assets/{name}")
+async def asset_file(name: str):
+    if not ENABLE_ASSETS:
+        raise HTTPException(status_code=404, detail="assets are disabled")
+    path = resources.asset_path(name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="unknown asset")
+    return FileResponse(
+        path,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=604800"},
     )
 
 

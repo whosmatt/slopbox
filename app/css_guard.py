@@ -20,7 +20,12 @@ from dataclasses import dataclass, field
 
 import tinycss2
 
-from .config import ALLOWED_URL_PREFIXES, MAX_CSS_BYTES
+from .config import ALLOWED_URL_PREFIXES, ENABLE_ASSETS, MAX_CSS_BYTES
+
+# Local pattern files, e.g. url(/assets/hatch.svg). A strict shape rather than a
+# prefix test, so no spelling of the value can walk out of the directory or turn
+# into a protocol-relative URL.
+ASSET_URL = re.compile(r"^/assets/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 ALLOWED_AT_RULES = {"media", "supports", "keyframes", "layer", "container", "scope"}
 # Prefixed keyframes are common and harmless.
@@ -88,10 +93,14 @@ def _check_url_value(value):
     collapsed = re.sub(r"\s+", "", v).lower()
     if not collapsed:
         return
+    if ENABLE_ASSETS and ASSET_URL.match(v) and ".." not in v:
+        return
     if not any(collapsed.startswith(p) for p in ALLOWED_URL_PREFIXES):
         _reject(
-            "url() target not allowed: " + repr(v[:40]) + ". Only inline base64 raster "
-            "data URIs are permitted - no external requests, no web fonts, no @import."
+            "url() target not allowed: " + repr(v[:40]) + ". Permitted: url(/assets/NAME) "
+            "for the built-in patterns, and inline base64 raster data URIs. No external "
+            "requests, no @import, and no @font-face - the local font families are "
+            "already declared for you."
         )
 
 
