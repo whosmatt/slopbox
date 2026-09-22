@@ -1,5 +1,5 @@
 fastapi==0.141.1
-uvicorn[standard]==0.52.4
+uvicorn[standard]==0.53.0
 openai==3.6.0
 # Must stay equal to the Playwright base image tag in the Dockerfile: the pip
 # package looks for a browser build of its own revision, and the image ships
