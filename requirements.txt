@@ -4,7 +4,7 @@ openai==3.6.0
 # Must stay equal to the Playwright base image tag in the Dockerfile: the pip
 # package looks for a browser build of its own revision, and the image ships
 # browsers for its tag. A mismatch fails at startup, not at build time.
-playwright==1.62.0
+playwright==1.63.0
 tinycss2==1.5.1
 # Allowlist HTML/SVG sanitiser (Rust ammonia bindings; the maintained successor
 # to bleach). Used for the agent's decorative markup.
