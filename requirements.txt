@@ -9,4 +9,4 @@ tinycss2==1.5.1
 # Allowlist HTML/SVG sanitiser (Rust ammonia bindings; the maintained successor
 # to bleach). Used for the agent's decorative markup.
 nh3==0.3.7
-python-dotenv==1.2.3
+python-dotenv==1.2.4
