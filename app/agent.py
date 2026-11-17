@@ -13,9 +13,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import time
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
 from . import bus, resources, store
 from .config import (
@@ -54,6 +55,43 @@ def get_client():
     if _client is None:
         _client = AsyncOpenAI(api_key=QWEN_API_KEY, base_url=QWEN_BASE_URL, timeout=180.0)
     return _client
+
+
+# HAHAHAHA this is so stupid
+_PARAM_FIXES = {}  # param name -> replacement name, or None to drop it
+_ESSENTIAL = {"model", "messages", "tools", "stream"}
+
+
+def _apply_param_fixes(kwargs):
+    out = dict(kwargs)
+    for name, repl in _PARAM_FIXES.items():
+        if name in out:
+            value = out.pop(name)
+            if repl:
+                out[repl] = value
+    return out
+
+
+def _learn_param_fix(err, kwargs):
+    """Record a fix for a rejected parameter. Returns False if none applies."""
+    param = getattr(err, "param", None)
+    if not param or param not in kwargs:
+        return False
+    if param in _ESSENTIAL or param in _PARAM_FIXES:
+        return False
+    match = re.search(r"Use '(\w+)' instead", str(err))
+    _PARAM_FIXES[param] = match.group(1) if match else None
+    return True
+
+
+async def _create_completion(**kwargs):
+    while True:
+        call = _apply_param_fixes(kwargs)
+        try:
+            return await get_client().chat.completions.create(**call)
+        except BadRequestError as err:
+            if not _learn_param_fix(err, call):
+                raise
 
 SYSTEM_PROMPT = """You are slopbox, the resident stylist of a website whose only
 job is to restyle itself on request. Visitors type a wish into a text box; you
@@ -863,7 +901,7 @@ class Run:
 
     async def _stream_turn(self):
         """One streamed completion. Returns (text, tool_calls)."""
-        stream = await get_client().chat.completions.create(
+        stream = await _create_completion(
             model=QWEN_MODEL,
             messages=self.messages,
             tools=TOOLS,
