@@ -102,6 +102,27 @@ def _valid(usage):
     return isinstance(usage, dict) and all(isinstance(usage.get(f, 0), int) for f in FIELDS)
 
 
+def spent_tag(spent):
+    """The running total in the footer, with the token breakdown as a title."""
+    if not isinstance(spent, dict) or not spent.get("runs"):
+        return ""
+    runs = int(spent.get("runs", 0))
+    unpriced = int(spent.get("unpriced_runs", 0))
+    tokens = int(spent.get("input", 0)) + int(spent.get("output", 0))
+    builds = "%d build%s" % (runs, "" if runs == 1 else "s")
+    if unpriced >= runs:
+        text = "%s spent on %s so far" % (_short_tokens(tokens), builds)
+    else:
+        text = "%s spent on %s so far" % (_money(float(spent.get("cost", 0.0))), builds)
+    title = "input {:,} (cached {:,}) / output {:,} (reasoning {:,}) / {:,} tokens in total".format(
+        int(spent.get("input", 0)), int(spent.get("cached", 0)),
+        int(spent.get("output", 0)), int(spent.get("reasoning", 0)), tokens)
+    if 0 < unpriced < runs:
+        title += " / %d early build%s ran before prices were set and count as $0" % (
+            unpriced, "" if unpriced == 1 else "s")
+    return '<span id="qb-spent" title="%s">%s</span>' % (escape(title), escape(text))
+
+
 def page_tag(usage):
     """The tag on the site itself. Fixed markup, styled by base.css and then by
     whatever the agent publishes."""

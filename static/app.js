@@ -167,16 +167,16 @@
      what they were served, exactly as they keep their stylesheet. */
   /* The price tag is server-rendered markup (escaped there), swapped whole.
      Its state is plain hover/focus, so replacing the node loses nothing. */
-  function refreshPrice(markup) {
-    var old = document.getElementById('qb-price');
+  function swapMarkup(id, markup, parentId, atStart) {
+    var old = document.getElementById(id);
     if (old && old.outerHTML === markup) return;
-    var root = document.getElementById('qb-root');
+    var parent = document.getElementById(parentId);
     var holder = document.createElement('div');
     holder.innerHTML = markup;
     var fresh = holder.firstElementChild;
     if (old && fresh) old.parentNode.replaceChild(fresh, old);
     else if (old) old.parentNode.removeChild(old);
-    else if (fresh && root) root.insertBefore(fresh, root.firstChild);
+    else if (fresh && parent) parent.insertBefore(fresh, atStart ? parent.firstChild : null);
   }
 
   function refreshParts(version) {
@@ -184,7 +184,8 @@
     fetch('/api/design', { cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        refreshPrice(d.price || '');
+        swapMarkup('qb-price', d.price || '', 'qb-root', true);
+        swapMarkup('qb-spent', d.spent || '', 'qb-links', false);
 
         var decor = document.getElementById('qb-decor');
         if (decor && decor.innerHTML !== d.decor) {
@@ -266,7 +267,8 @@
         setStatus('new look is live');
         break;
       case 'price':
-        /* The run has ended and its final cost is recorded. */
+        /* A run has ended: its final cost is recorded and the site total has
+           grown, whether or not it published anything. */
         refreshParts(ev.version);
         break;
       case 'error':

@@ -280,6 +280,32 @@ def update_usage(version, usage):
             _write_meta(meta)
 
 
+def add_spend(usage):
+    """Add one run's usage to the all-time total kept in meta.
+
+    Every run counts, published or not: a build that failed validation or ran
+    out of steps was paid for all the same. Survives reset and rollback for the
+    same reason.
+    """
+    if not isinstance(usage, dict) or not usage.get("steps"):
+        return
+    with _lock:
+        meta = read_meta()
+        spent = meta.get("spent")
+        if not isinstance(spent, dict):
+            spent = {"cost": 0.0, "runs": 0, "unpriced_runs": 0, "input": 0,
+                     "cached": 0, "output": 0, "reasoning": 0, "since": time.time()}
+        spent["runs"] = spent.get("runs", 0) + 1
+        for key in ("input", "cached", "output", "reasoning"):
+            spent[key] = spent.get(key, 0) + int(usage.get(key) or 0)
+        if usage.get("cost") is None:
+            spent["unpriced_runs"] = spent.get("unpriced_runs", 0) + 1
+        else:
+            spent["cost"] = spent.get("cost", 0.0) + float(usage["cost"])
+        meta["spent"] = spent
+        _write_meta(meta)
+
+
 def history_usage(version):
     try:
         return (_read_index().get(str(int(version))) or {}).get("usage")

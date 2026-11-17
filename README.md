@@ -285,6 +285,10 @@ have to be set for it to show a cost; without them it shows a token count. The
 cost is fixed when recorded, so changing prices later does not reprice old
 designs. Designs built before this existed simply have no tag.
 
+The footer also keeps a running total across every run - published or not,
+since a build that failed validation was paid for all the same - with the token
+breakdown as a tooltip. It lives in `meta.json` and survives reset and rollback.
+
 Context is bounded rather than trusted to stay small: every run starts fresh,
 old screenshots are replaced by a placeholder so only the newest image is ever
 in context, and the transcript is mechanically compacted once it exceeds

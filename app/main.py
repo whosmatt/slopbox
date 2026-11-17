@@ -274,6 +274,7 @@ def _page(safe_mode=False, preview=False, pinned=None):
         html.replace("<!--FONTS_CSS-->", fonts)
         .replace("<!--CUSTOM_STYLE-->", sheet)
         .replace("<!--PRICE-->", _price_for(mode, pinned))
+        .replace("<!--SPENT-->", cost.spent_tag(store.read_meta().get("spent")))
         .replace("<!--DECOR-->", decor)
         .replace("<!--SKETCH_TOP-->", top)
         .replace("<!--SKETCH_MAIN-->", main)
@@ -650,6 +651,7 @@ async def api_design():
         "interactive": sketch_meta["interactive"],
         "sketchSrc": "/sketch.html?v=live",
         "price": _price_for("live"),
+        "spent": cost.spent_tag(meta.get("spent")),
     }
 
 

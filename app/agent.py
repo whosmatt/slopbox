@@ -190,7 +190,9 @@ THE PAGE (fixed HTML you cannot change - style it, do not expect to alter it):
     #qb-header        with #qb-title ("slopbox") and #qb-tagline
     #qb-main          with #chat (message log), #prompt-form
                       containing #prompt-input and #prompt-submit
-    #qb-footer        with #qb-links and its <a> elements
+    #qb-footer        with #qb-links: its <a> elements, #qb-note (a remark
+                      naming the model) and #qb-spent (what the site has cost
+                      in total so far)
   Chat messages are  #chat .msg  with .msg.user / .msg.assistant / .msg.system,
                      each containing .msg-role and .msg-text.
   .msg.shot          holds img.msg-shot - a screenshot of your own candidate,
@@ -1003,10 +1005,12 @@ class Run:
         finally:
             self.accepting_steering = False
             store.clear_candidate()
+            final = cost.priced(self.usage)
             if self.version is not None:
                 # Top up the recorded cost with the steps after publish.
-                store.update_usage(self.version, cost.priced(self.usage))
-                bus.publish({"type": "price", "version": self.version})
+                store.update_usage(self.version, final)
+            store.add_spend(final)
+            bus.publish({"type": "price", "version": self.version})
             bus.publish({"type": "status", "text": "idle", "busy": False})
 
     async def _stream_turn(self):
