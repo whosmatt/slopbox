@@ -1,6 +1,6 @@
 """The slopbox agent.
 
-Runs an OpenAI-compatible chat model in a tool loop whose only
+Runs a model over the OpenAI Responses API in a tool loop whose only
 capability is "propose a stylesheet". There is no shell tool, no filesystem
 tool, no fetch tool - the tool table below is the entire attack surface, and
 every write goes through the sanitiser plus the browser validator.
@@ -57,41 +57,129 @@ def get_client():
     return _client
 
 
-# HAHAHAHA this is so stupid
-_PARAM_FIXES = {}  # param name -> replacement name, or None to drop it
-_ESSENTIAL = {"model", "messages", "tools", "stream"}
+# Providers disagree on which request parameters a model accepts: OpenAI's
+# reasoning models reject a non-default temperature, non-reasoning models
+# reject reasoning settings, and so on. Rather than keep a table of models,
+# send everything and adapt when a 400 names a parameter: rename it if the
+# error suggests a replacement, otherwise drop it. Dotted names such as
+# "reasoning.summary" drop just that key. Learned once per process.
+_PARAM_FIXES = {}  # param path -> replacement name, or None to drop it
+_ESSENTIAL = {"model", "input", "instructions", "tools", "stream"}
 
 
 def _apply_param_fixes(kwargs):
     out = dict(kwargs)
-    for name, repl in _PARAM_FIXES.items():
-        if name in out:
-            value = out.pop(name)
-            if repl:
-                out[repl] = value
+    for path, repl in _PARAM_FIXES.items():
+        head, _, rest = path.partition(".")
+        if head not in out:
+            continue
+        if rest:
+            if isinstance(out[head], dict):
+                out[head] = {k: v for k, v in out[head].items() if k != rest}
+            continue
+        value = out.pop(head)
+        if repl:
+            out[repl] = value
     return out
 
 
 def _learn_param_fix(err, kwargs):
     """Record a fix for a rejected parameter. Returns False if none applies."""
     param = getattr(err, "param", None)
-    if not param or param not in kwargs:
+    if not param or param in _PARAM_FIXES:
         return False
-    if param in _ESSENTIAL or param in _PARAM_FIXES:
+    head, _, rest = param.partition(".")
+    if head not in kwargs or head in _ESSENTIAL:
         return False
-    match = re.search(r"Use '(\w+)' instead", str(err))
+    if rest and not (isinstance(kwargs[head], dict) and rest in kwargs[head]):
+        return False
+    match = None if rest else re.search(r"Use '(\w+)' instead", str(err))
     _PARAM_FIXES[param] = match.group(1) if match else None
     return True
 
 
-async def _create_completion(**kwargs):
+async def _create_response(**kwargs):
     while True:
         call = _apply_param_fixes(kwargs)
         try:
-            return await get_client().chat.completions.create(**call)
+            return await get_client().responses.create(**call)
         except BadRequestError as err:
             if not _learn_param_fix(err, call):
                 raise
+
+
+def _responses_tools(tools):
+    """Chat-style tool specs, flattened to the Responses API shape.
+
+    strict is off on purpose: several tools have optional arguments, and strict
+    mode demands every property be required.
+    """
+    out = []
+    for t in tools:
+        fn = t["function"]
+        out.append(
+            {
+                "type": "function",
+                "name": fn["name"],
+                "description": fn.get("description", ""),
+                "parameters": fn["parameters"],
+                "strict": False,
+            }
+        )
+    return out
+
+
+def _responses_content(content):
+    if isinstance(content, str):
+        return content
+    parts = []
+    for p in content or ():
+        if p.get("type") == "text":
+            parts.append({"type": "input_text", "text": p.get("text", "")})
+        elif p.get("type") == "image_url":
+            parts.append({"type": "input_image", "image_url": p["image_url"]["url"]})
+    return parts
+
+
+def to_responses_input(messages):
+    """Translate the chat-shaped transcript into (instructions, input items).
+
+    The transcript keeps the chat completions shape because everything that
+    trims and compacts it is written against that shape. Reasoning items ride
+    along on the assistant message under "_reasoning" and are replayed ahead of
+    its calls, so the model keeps its chain of thought across tool steps.
+    """
+    instructions = None
+    items = []
+    for m in messages:
+        role = m.get("role")
+        if role == "system":
+            instructions = m["content"]
+        elif role == "user":
+            items.append({"role": "user", "content": _responses_content(m["content"])})
+        elif role == "assistant":
+            items.extend(m.get("_reasoning") or ())
+            if m.get("content"):
+                items.append({"role": "assistant", "content": m["content"]})
+            for tc in m.get("tool_calls") or ():
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": tc["id"],
+                        "name": tc["function"]["name"],
+                        "arguments": tc["function"]["arguments"],
+                    }
+                )
+        elif role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": m["tool_call_id"],
+                    "output": m["content"] if isinstance(m["content"], str) else "",
+                }
+            )
+    return instructions, items
+
 
 SYSTEM_PROMPT = """You are slopbox, the resident stylist of a website whose only
 job is to restyle itself on request. Visitors type a wish into a text box; you
@@ -370,6 +458,8 @@ if ENABLE_HTML:
 if ENABLE_SKETCH:
     TOOLS.append(SKETCH_TOOL)
 
+RESPONSES_TOOLS = _responses_tools(TOOLS)
+
 IMAGE_PLACEHOLDER = "[earlier screenshot dropped to save context]"
 STALE_IMAGE = (
     "[screenshot removed: it showed an EARLIER draft and no longer reflects the "
@@ -509,6 +599,8 @@ def _approx_chars(messages):
                     total += 3000
         for tc in m.get("tool_calls") or ():
             total += len(json.dumps(tc))
+        for r in m.get("_reasoning") or ():
+            total += len(json.dumps(r))
     return total
 
 
@@ -531,6 +623,7 @@ class Run:
         self.last_failure: list = []
         self.exhausted = False
         self.last_finish_reason = None
+        self.last_reasoning: list = []
         self.writes = 0
         self._last_nudge_writes = None
         # Cleared once the loop can no longer consume steering, so late prompts
@@ -842,6 +935,7 @@ class Run:
                         "role": "assistant",
                         "content": text or None,
                         "tool_calls": outgoing,
+                        "_reasoning": self.last_reasoning,
                     }
                 )
 
@@ -900,73 +994,112 @@ class Run:
             bus.publish({"type": "status", "text": "idle", "busy": False})
 
     async def _stream_turn(self):
-        """One streamed completion. Returns (text, tool_calls)."""
-        stream = await _create_completion(
+        """One streamed response. Returns (text, tool_calls).
+
+        Reasoning items from the response are left on self.last_reasoning for
+        the caller to attach to the assistant turn.
+        """
+        instructions, items = to_responses_input(self.messages)
+        params = dict(
             model=LLM_MODEL,
-            messages=self.messages,
-            tools=TOOLS,
+            instructions=instructions,
+            input=items,
+            tools=RESPONSES_TOOLS,
             tool_choice="auto",
             temperature=0.8,
-            max_tokens=MAX_TOKENS,
-            reasoning_effort=REASONING_EFFORT,
+            max_output_tokens=MAX_TOKENS,
+            # Nothing is kept server side; reasoning travels back to us
+            # encrypted and is replayed on the next step instead.
+            store=False,
+            include=["reasoning.encrypted_content"],
             stream=True,
         )
+        if REASONING_EFFORT:
+            params["reasoning"] = {"effort": REASONING_EFFORT, "summary": "auto"}
+        stream = await _create_response(**params)
 
         text_parts = []
-        calls = {}
-        order = []
+        calls = {}  # output_index -> {"id", "name", "arguments"}
+        reasoning = []
         msg_id = "m%d" % int(time.time() * 1000)
         opened = False
         think_opened = False
         finish_reason = None
 
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            if chunk.choices[0].finish_reason:
-                finish_reason = chunk.choices[0].finish_reason
-            delta = chunk.choices[0].delta
-            if delta is None:
-                continue
+        def think(piece):
+            nonlocal think_opened
+            if not think_opened:
+                bus.publish(
+                    {"type": "message", "role": "thinking", "mid": msg_id + ":r", "text": ""}
+                )
+                think_opened = True
+            bus.publish({"type": "delta", "mid": msg_id + ":r", "text": piece})
 
-            # This model streams its deliberation separately from its answer,
-            # and often says nothing in `content` at all when calling a tool -
-            # so the thinking is what the visitor actually watches happen.
-            think = getattr(delta, "reasoning", None) or getattr(
-                delta, "reasoning_content", None
-            )
-            if think:
-                if not think_opened:
-                    bus.publish(
-                        {"type": "message", "role": "thinking", "mid": msg_id + ":r", "text": ""}
-                    )
-                    think_opened = True
-                bus.publish({"type": "delta", "mid": msg_id + ":r", "text": think})
+        async for event in stream:
+            etype = getattr(event, "type", "")
 
-            piece = getattr(delta, "content", None)
-            if piece:
-                if not opened:
-                    bus.publish({"type": "message", "role": "assistant", "mid": msg_id, "text": ""})
-                    opened = True
-                text_parts.append(piece)
-                bus.publish({"type": "delta", "mid": msg_id, "text": piece})
+            # The model's deliberation streams separately from its answer, and it
+            # often says nothing at all when calling a tool - so the thinking is
+            # what the visitor actually watches happen. OpenAI sends summaries;
+            # open-weight servers may send the raw reasoning text instead.
+            if etype in (
+                "response.reasoning_summary_text.delta",
+                "response.reasoning_text.delta",
+            ):
+                if event.delta:
+                    think(event.delta)
+            elif etype == "response.reasoning_summary_part.done" and think_opened:
+                think(chr(10) + chr(10))
 
-            for tc in getattr(delta, "tool_calls", None) or ():
-                idx = tc.index if tc.index is not None else 0
-                slot = calls.setdefault(idx, {"id": None, "name": "", "arguments": ""})
-                if idx not in order:
-                    order.append(idx)
-                if tc.id:
-                    slot["id"] = tc.id
-                fn = getattr(tc, "function", None)
-                if fn is not None:
-                    if getattr(fn, "name", None):
-                        slot["name"] = fn.name
-                    if getattr(fn, "arguments", None):
-                        slot["arguments"] += fn.arguments
+            elif etype == "response.output_text.delta":
+                if event.delta:
+                    if not opened:
+                        bus.publish(
+                            {"type": "message", "role": "assistant", "mid": msg_id, "text": ""}
+                        )
+                        opened = True
+                    text_parts.append(event.delta)
+                    bus.publish({"type": "delta", "mid": msg_id, "text": event.delta})
+
+            elif etype == "response.output_item.added":
+                item = event.item
+                if getattr(item, "type", None) == "function_call":
+                    calls[event.output_index] = {
+                        "id": item.call_id,
+                        "name": item.name or "",
+                        "arguments": item.arguments or "",
+                    }
+            elif etype == "response.function_call_arguments.delta":
+                slot = calls.get(event.output_index)
+                if slot is not None:
+                    slot["arguments"] += event.delta or ""
+
+            elif etype == "response.output_item.done":
+                item = event.item
+                itype = getattr(item, "type", None)
+                if itype == "function_call":
+                    calls[event.output_index] = {
+                        "id": item.call_id,
+                        "name": item.name or "",
+                        "arguments": item.arguments or "",
+                    }
+                elif itype == "reasoning":
+                    reasoning.append(item.model_dump(exclude_none=True))
+
+            elif etype == "response.incomplete":
+                details = getattr(event.response, "incomplete_details", None)
+                if getattr(details, "reason", None) == "max_output_tokens":
+                    finish_reason = "length"
+            elif etype == "response.failed":
+                error = getattr(event.response, "error", None)
+                raise RuntimeError(
+                    "response failed: %s" % (getattr(error, "message", None) or error)
+                )
+            elif etype == "error":
+                raise RuntimeError("stream error: %s" % getattr(event, "message", event))
 
         tool_calls = []
-        for i in order:
+        for i in sorted(calls):
             slot = calls[i]
             if not slot["name"]:
                 continue
@@ -974,6 +1107,7 @@ class Run:
             tool_calls.append(slot)
 
         self.last_finish_reason = finish_reason
+        self.last_reasoning = reasoning
 
         if finish_reason == "length" and not tool_calls:
             # It thought itself out of budget. Nudge it towards acting.

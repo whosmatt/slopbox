@@ -7,7 +7,7 @@ services:
     ports:
       - "8012:8000"
     environment:
-      # Any OpenAI-compatible API (Hetzner, OpenAI, ...). For OpenAI use
+      # Any API serving the OpenAI Responses endpoint (/v1/responses). For OpenAI use
       # LLM_BASE_URL "https://api.openai.com/v1" and a model such as "gpt-5".
       LLM_API_KEY: "xxx"
       # Guards /admin/reset and /admin/rollback. Leave empty to disable them.

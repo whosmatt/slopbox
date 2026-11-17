@@ -23,7 +23,8 @@ MAX_STEPS = int(os.getenv("MAX_STEPS", "24"))
 # Reasoning models (Qwen3.6, OpenAI gpt-5/o-series) will happily spend
 # thousands of tokens deliberating. "low" keeps it deliberating usefully
 # without stalling the UI.
-REASONING_EFFORT = os.getenv("REASONING_EFFORT", "low")
+# Empty sends no reasoning settings, for models that do not reason.
+REASONING_EFFORT = os.getenv("REASONING_EFFORT", "low").strip()
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "12000"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "240000"))
 MAX_CSS_BYTES = int(os.getenv("MAX_CSS_BYTES", "100000"))

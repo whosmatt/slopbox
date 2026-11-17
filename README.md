@@ -249,17 +249,31 @@ the outbound request.
 
 ## The model
 
-Any OpenAI-compatible endpoint, set with `LLM_API_KEY`, `LLM_BASE_URL` and
-`LLM_MODEL`. The default is `Qwen/Qwen3.6-35B-A3B-FP8` on Hetzner. It is a
-reasoning model, and two things about that shaped the code:
+Any endpoint that speaks the OpenAI Responses API (`/v1/responses`), set with
+`LLM_API_KEY`, `LLM_BASE_URL` and `LLM_MODEL` - OpenAI itself, or a server such
+as vLLM. Chat completions is not used: OpenAI refuses function tools together
+with reasoning there. The defaults still name `Qwen/Qwen3.6-35B-A3B-FP8` on
+Hetzner, which only works if that endpoint serves `/responses`.
 
-- It streams deliberation in a `reasoning` field and very often leaves `content`
-  empty entirely when calling a tool. So the visible chat log is fed by the
+The transcript is kept in chat-completions shape internally (all the trimming
+and compaction is written against it) and translated to Responses items on each
+request. Nothing is stored server side (`store: false`); reasoning comes back
+encrypted and is replayed with the tool calls that followed it, so the model
+keeps its train of thought across steps. Parameters a model rejects by name
+(`temperature` on reasoning models, reasoning summaries for an unverified
+organisation, ...) are dropped on the first 400 and stay dropped for the
+process.
+
+Reasoning models shaped the code in two ways:
+
+- They stream deliberation (a summary on OpenAI, raw reasoning text on
+  open-weight servers) and very often say nothing at all when calling a tool. So the visible chat log is fed by the
   reasoning stream - that *is* the progress indicator. It runs to thousands of
   characters, so each thinking message is a collapsed `<details>` whose summary
   carries a live tail of the stream; click to read the whole thing.
 - Left alone it will spend thousands of tokens deciding how to say hello.
-  `REASONING_EFFORT=low` keeps it deliberating usefully without stalling the UI.
+  `REASONING_EFFORT=low` keeps it deliberating usefully without stalling the UI;
+  set it empty to send no reasoning settings at all.
 
 Context is bounded rather than trusted to stay small: every run starts fresh,
 old screenshots are replaced by a placeholder so only the newest image is ever
