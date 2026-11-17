@@ -353,6 +353,133 @@ async def measure_text_contrast(page, info):
     return None
 
 
+# Where things sit on the page, and whether the chat is holding its content.
+# Read at the top of the page so document coordinates are stable. Overflow is
+# what goes wrong most once designs get ambitious: long words and screenshots
+# spilling out of message bubbles, or the chat scrolling sideways.
+LAYOUT_JS = r"""
+() => {
+  const vh = innerHeight, vw = innerWidth, sy = scrollY;
+  const de = document.documentElement;
+  const height = Math.max(de.scrollHeight, document.body ? document.body.scrollHeight : 0);
+  const part = (sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return null;
+    const cs = getComputedStyle(el), r = el.getBoundingClientRect();
+    if (cs.display === 'none' || (r.width < 1 && r.height < 1)) return null;
+    return { top: Math.round(r.top + sy), bottom: Math.round(r.bottom + sy),
+             fixed: cs.position === 'fixed' || cs.position === 'sticky' };
+  };
+  const parts = {
+    header: part('#qb-header'), sketch: part('#qb-sketch'), chat: part('#chat'),
+    'prompt box': part('#prompt-input'), footer: part('#qb-footer'),
+  };
+  const issues = [];
+  const add = (t) => { if (issues.length < 6 && issues.indexOf(t) === -1) issues.push(t); };
+  if (de.scrollWidth > vw + 1) add('the page is ' + de.scrollWidth + 'px wide in a ' + vw +
+    'px viewport, so it scrolls sideways');
+  const chat = document.getElementById('chat');
+  if (chat) {
+    const cr = chat.getBoundingClientRect();
+    if (chat.scrollWidth > chat.clientWidth + 1) add('#chat scrolls sideways (content ' +
+      chat.scrollWidth + 'px in ' + chat.clientWidth + 'px)');
+    chat.querySelectorAll('.msg').forEach((m) => {
+      const kind = '.msg.' + (m.className.split(/\s+/).filter(c => c !== 'msg')[0] || '?');
+      const mr = m.getBoundingClientRect();
+      if (mr.right > cr.right + 1 || mr.left < cr.left - 1) add(kind + ' sticks out of #chat by ' +
+        Math.round(Math.max(mr.right - cr.right, cr.left - mr.left)) + 'px');
+      if (m.scrollWidth > m.clientWidth + 1) add(kind + ' content is wider than the bubble (' +
+        m.scrollWidth + 'px in ' + m.clientWidth + 'px) and gets clipped or spills');
+      const t = m.querySelector('.msg-text');
+      if (t && t.scrollWidth > t.clientWidth + 1) add(kind + ' .msg-text does not wrap: a long ' +
+        'word runs ' + (t.scrollWidth - t.clientWidth) + 'px past its box (try overflow-wrap:anywhere)');
+      const img = m.querySelector('img.msg-shot');
+      if (img) {
+        const ir = img.getBoundingClientRect();
+        if (ir.right > mr.right + 1 || ir.left < mr.left - 1) add('img.msg-shot is wider than its ' +
+          '.msg.shot bubble (' + Math.round(ir.width) + 'px in ' + Math.round(mr.width) + 'px)');
+        else if (ir.height > vh * 0.8) add('img.msg-shot is ' + Math.round(ir.height) +
+          'px tall - most of a screen for one thumbnail');
+      }
+    });
+  }
+  return { height, vh, vw, parts, issues };
+}
+"""
+
+
+def describe_layout(label, data):
+    """One readable paragraph about where things are on a page."""
+    if not isinstance(data, dict) or not data.get("vh"):
+        return ""
+    vh, height = data["vh"], data["height"]
+    bits = []
+    for name, p in (data.get("parts") or {}).items():
+        if not p:
+            continue
+        where = "%s-%s" % (format(p["top"], ","), format(p["bottom"], ","))
+        if p.get("fixed"):
+            where += " (fixed)"
+        elif p["bottom"] > vh:
+            screens = p["top"] / vh
+            where += " (%s)" % ("starts above the fold, ends below it" if p["top"] < vh
+                               else "%.1f screens down" % screens)
+        bits.append("%s %s" % (name, where))
+    text = "%s: page %spx tall = %.1f screens of %dpx. %s." % (
+        label, format(height, ","), height / vh, vh, "; ".join(bits))
+    issues = data.get("issues") or []
+    text += (" Overflow: " + "; ".join(issues) + ".") if issues else " No overflow found."
+    return text
+
+
+SCROLL_MODES = ("auto", "top", "prompt", "bottom", "all")
+MAX_SLICES = 4
+
+
+def scroll_targets(mode, data, label):
+    """Scroll offsets to photograph for a screenshot mode."""
+    vh = (data or {}).get("vh") or 800
+    height = (data or {}).get("height") or vh
+    last = max(0, height - vh)
+    prompt = ((data or {}).get("parts") or {}).get("prompt box")
+    # Prompt box near the bottom of the screen, so the chat above it shows.
+    at_prompt = min(last, max(0, prompt["bottom"] + 60 - vh)) if prompt else last
+    if isinstance(mode, int):
+        return [min(last, max(0, mode))]
+    if mode == "top":
+        return [0]
+    if mode == "prompt":
+        return [at_prompt]
+    if mode == "bottom":
+        return [last]
+    if mode == "all":
+        ys = []
+        for i in range(MAX_SLICES):
+            y = min(last, i * vh)
+            if y not in ys:
+                ys.append(y)
+            if y >= last:
+                break
+        return ys
+    # auto: the first screen, plus the chat and prompt box when they are below
+    # it - desktop only, to keep the image count down.
+    ys = [0]
+    if label == "desktop" and prompt and prompt["bottom"] > vh and at_prompt > 0:
+        ys.append(at_prompt)
+    return ys
+
+
+def parse_scroll(value):
+    if value is None or value == "":
+        return "auto"
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip().lower().rstrip("px")
+    if text.isdigit():
+        return int(text)
+    return text if text in SCROLL_MODES else "auto"
+
+
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 
 
@@ -385,6 +512,8 @@ class Report:
     # What the sketch frame logged - errors and console output - or None when
     # the page has no sketch.
     sketch_log: list = None
+    # label -> one-paragraph description of the page layout (screenshots only)
+    layout: dict = field(default_factory=dict)
 
     def summary(self):
         if self.ok:
@@ -532,9 +661,10 @@ class BrowserPool:
             task.exception()  # retrieved, so asyncio does not warn about it
         return None
 
-    async def inspect(self, url, screenshot_only=False, viewports=None, samples=None):
+    async def inspect(self, url, screenshot_only=False, viewports=None, samples=None,
+                      scroll=None):
         report = await self._limited(
-            self._inspect(url, screenshot_only, viewports, samples), INSPECT_LIMIT_S
+            self._inspect(url, screenshot_only, viewports, samples, scroll), INSPECT_LIMIT_S
         )
         if report is None:
             what = "rendering" if screenshot_only else "validation"
@@ -547,8 +677,16 @@ class BrowserPool:
             result = PlayResult(error=FROZE % ("the test play", PLAY_LIMIT_S))
         return result
 
-    async def _inspect(self, url, screenshot_only=False, viewports=None, samples=None):
-        """Load `url` at each viewport, run the checks, grab screenshots."""
+    async def _inspect(self, url, screenshot_only=False, viewports=None, samples=None,
+                       scroll=None):
+        """Load `url` at each viewport, run the checks, grab screenshots.
+
+        For screenshots, `scroll` picks which parts of a long page to show -
+        always as real viewport-sized shots taken after scrolling, so fixed
+        elements, vh units and the fold look exactly as a visitor sees them.
+        """
+        mode = parse_scroll(scroll)
+        layout = {}
         if self._browser is None:
             await self.start()
         viewports = viewports or VIEWPORTS
@@ -573,7 +711,19 @@ class BrowserPool:
                         _merge_log(sketch_log, await read_sketch_log(page))
 
                     if screenshot_only:
-                        shots[label] = await page.screenshot(type="jpeg", quality=72)
+                        try:
+                            data = await page.evaluate(LAYOUT_JS)
+                        except Exception:
+                            data = None
+                        layout[label] = describe_layout(label, data)
+                        for y in scroll_targets(mode, data, label):
+                            await page.evaluate(
+                                "y => window.scrollTo({top: y, left: 0, behavior: 'instant'})", y)
+                            await page.wait_for_timeout(200)
+                            actual = int(await page.evaluate("() => Math.round(scrollY)"))
+                            name = label if actual == 0 else "%s scrolled %spx down" % (
+                                label, format(actual, ","))
+                            shots[name] = await page.screenshot(type="jpeg", quality=72)
                         continue
 
                     last = None
@@ -648,7 +798,7 @@ class BrowserPool:
 
         return Report(
             ok=not problems, problems=problems, warnings=warnings, info=info,
-            shots=shots, sketch_log=sketch_log,
+            shots=shots, sketch_log=sketch_log, layout=layout,
         )
 
     async def _play(self, url, actions, viewport=None):

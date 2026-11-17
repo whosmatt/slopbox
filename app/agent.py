@@ -290,8 +290,12 @@ if ENABLE_SKETCH:
         "(document.documentElement.requestFullscreen()) - both only from a click "
         "or key handler, both end on Esc, and SLOP.fit re-sizes for fullscreen. "
         "Going fullscreen uses up the click, so in one handler request the pointer "
-        "lock FIRST, then fullscreen. Offer them on click; never assume either is "
-        "active, and keep the sketch playable without them. play_sketch's log "
+        "lock FIRST, then fullscreen. A game steered by the mouse should grab the "
+        "pointer the way browser games do: on the first click into the frame (the "
+        "same click that starts play), not behind a separate button - and again on "
+        "the next click after Esc released it. Leave fullscreen opt-in (a key or a "
+        "small button). Never assume either is active, and keep the sketch "
+        "playable without them. play_sketch's log "
         "shows whether they were granted if you console.log it. "
         "Synths, toys and small games are very welcome here - go beyond decoration "
         "when the request invites it. TESTING A SKETCH: screenshot and publish both "
@@ -362,8 +366,11 @@ TOOLS = [
         "function": {
             "name": "screenshot",
             "description": (
-                "Render the candidate stylesheet in a real browser and look at it. "
-                "Returns a desktop and a mobile screenshot."
+                "Render the candidate in a real browser and look at it. Returns "
+                "viewport-sized screenshots - exactly what a visitor's screen shows - "
+                "plus a layout summary: where each part sits, how far down, and any "
+                "overflow in the chat. By default: the first screen of each viewport, "
+                "plus the chat and prompt box on desktop when they are below the fold."
             ),
             "parameters": {
                 "type": "object",
@@ -372,7 +379,15 @@ TOOLS = [
                         "type": "string",
                         "enum": ["desktop", "mobile", "both"],
                         "description": "Which viewport(s) to capture. Default both.",
-                    }
+                    },
+                    "scroll": {
+                        "type": "string",
+                        "description": (
+                            "What to photograph on a long page: auto (default), top, "
+                            "prompt (scrolled to the chat and prompt box), bottom, all "
+                            "(up to 4 screens in sequence), or a pixel offset like 1200."
+                        ),
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -969,7 +984,8 @@ class Run:
         from .config import VIEWPORTS
 
         vps = VIEWPORTS if which == "both" else [v for v in VIEWPORTS if v[0] == which] or VIEWPORTS
-        report = await POOL.inspect(self_url() + "/preview", screenshot_only=True, viewports=vps)
+        report = await POOL.inspect(self_url() + "/preview", screenshot_only=True,
+                                    viewports=vps, scroll=args.get("scroll"))
         if not report.shots:
             return "Screenshot failed: " + ("; ".join(report.problems) or "unknown error"), None
         _publish_shot(report, "candidate")
@@ -983,8 +999,11 @@ class Run:
         for label, data in report.shots.items():
             parts.append({"type": "text", "text": label + " view:"})
             parts.append({"type": "image_url", "image_url": {"url": _b64_image(data)}})
+        extra = [t for t in report.layout.values() if t]
         log = format_sketch_log(report.sketch_log)
-        return "Screenshots attached below." + ((chr(10) + log) if log else ""), parts
+        if log:
+            extra.append(log)
+        return chr(10).join(["Screenshots attached below."] + extra), parts
 
     async def _tool_publish(self, args):
         if not store.has_candidate():

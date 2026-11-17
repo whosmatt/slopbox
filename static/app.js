@@ -130,6 +130,15 @@
   }
 
   var MODE = document.documentElement.getAttribute('data-mode');
+
+  /* A stand-in for the screenshot messages a real run posts: same 1280x800
+     shape, inline so the preview needs nothing else. */
+  var PREVIEW_SHOT = 'data:image/svg+xml,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800">' +
+    '<rect width="1280" height="800" fill="#3a2a4a"/>' +
+    '<rect x="390" y="150" width="500" height="60" rx="8" fill="#e8c27a"/>' +
+    '<rect x="330" y="260" width="620" height="300" rx="10" fill="#241a30"/>' +
+    '<rect x="330" y="590" width="620" height="56" rx="8" fill="#f4ead8"/></svg>');
   /* safe   - served deliberately bare, nothing may style it back
      pinned - showing a design chosen from the gallery, which must survive
               whatever anyone else publishes while this visitor reads it */
@@ -325,11 +334,19 @@
      live stream: it makes the readability checks deterministic, and it means the
      model's own screenshots show what the chat will actually look like. */
   if (MODE === 'preview') {
-    addMessage('user', 'make it look like a haunted library at midnight');
+    /* Representative of a real run, including the awkward parts: a long
+       prompt with an unbroken token, a multi-sentence reply, and a screenshot
+       message at the real 16:10 aspect - those are what overflow the chat. */
+    addMessage('user', 'make it look like a haunted library at midnight, with ' +
+      'flickering candles, dusty shelves and a ghost that drifts past now and ' +
+      'then - like https://example.com/a-really-long-reference-link-that-never-breaks');
     addMessage('thinking', 'The visitor wants something gothic and dim. Deep ' +
       'browns, candlelight amber, a serif face, and a slow flicker on the ' +
       'headings. The prompt box needs to stay legible against all of it.');
-    addMessage('assistant', 'Dimming the lights and lighting the candles.');
+    addImage(PREVIEW_SHOT, 'candidate');
+    addMessage('assistant', 'Dimming the lights and lighting the candles. The ' +
+      'shelves are a repeating gradient, and the ghost is a sketch that drifts ' +
+      'across the header every few seconds.');
     addMessage('system', 'Published. The new look is live.');
     return;
   }
