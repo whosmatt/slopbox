@@ -249,7 +249,8 @@ the outbound request.
 
 ## The model
 
-`Qwen/Qwen3.6-35B-A3B-FP8` on Hetzner's OpenAI-compatible endpoint. It is a
+Any OpenAI-compatible endpoint, set with `LLM_API_KEY`, `LLM_BASE_URL` and
+`LLM_MODEL`. The default is `Qwen/Qwen3.6-35B-A3B-FP8` on Hetzner. It is a
 reasoning model, and two things about that shaped the code:
 
 - It streams deliberation in a `reasoning` field and very often leaves `content`

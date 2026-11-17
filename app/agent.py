@@ -1,6 +1,6 @@
 """The slopbox agent.
 
-Runs Qwen (Hetzner Inference API, OpenAI-compatible) in a tool loop whose only
+Runs an OpenAI-compatible chat model in a tool loop whose only
 capability is "propose a stylesheet". There is no shell tool, no filesystem
 tool, no fetch tool - the tool table below is the entire attack surface, and
 every write goes through the sanitiser plus the browser validator.
@@ -31,9 +31,9 @@ from .config import (
     MAX_STEPS,
     MAX_TOKENS,
     REASONING_EFFORT,
-    QWEN_API_KEY,
-    QWEN_BASE_URL,
-    QWEN_MODEL,
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_MODEL,
     self_url,
 )
 from .css_guard import sanitize
@@ -53,7 +53,7 @@ def get_client():
     """
     global _client
     if _client is None:
-        _client = AsyncOpenAI(api_key=QWEN_API_KEY, base_url=QWEN_BASE_URL, timeout=180.0)
+        _client = AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=180.0)
     return _client
 
 
@@ -902,7 +902,7 @@ class Run:
     async def _stream_turn(self):
         """One streamed completion. Returns (text, tool_calls)."""
         stream = await _create_completion(
-            model=QWEN_MODEL,
+            model=LLM_MODEL,
             messages=self.messages,
             tools=TOOLS,
             tool_choice="auto",

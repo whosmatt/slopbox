@@ -10,9 +10,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
 
-QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
-QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://inference.hetzner.com/api/v1")
-QWEN_MODEL = os.getenv("QWEN_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://inference.hetzner.com/api/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8")
 
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
@@ -20,8 +20,9 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 # scripted sketch, and the original reason for a tight budget - runs looping
 # on a stale screenshot - was a bug that has since been fixed.
 MAX_STEPS = int(os.getenv("MAX_STEPS", "24"))
-# Qwen3.6 is a reasoning model and will happily spend thousands of tokens
-# deliberating. "low" keeps it deliberating usefully without stalling the UI.
+# Reasoning models (Qwen3.6, OpenAI gpt-5/o-series) will happily spend
+# thousands of tokens deliberating. "low" keeps it deliberating usefully
+# without stalling the UI.
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "low")
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "12000"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "240000"))
