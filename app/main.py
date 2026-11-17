@@ -479,22 +479,42 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:t
 (function () {
   var interactive = false, captured = false, badge = null, resizers = [];
 
+  /* fit() must not call getContext('2d') itself: that claims the canvas as 2D
+     for good, and a WebGL renderer created on it afterwards (three.js) fails.
+     So record which kind of context the sketch asks for, and only apply the
+     pixel-ratio transform once it is known to be 2D. */
+  var nativeGetContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function (type, opts) {
+    var ctx = nativeGetContext.call(this, type, opts);
+    if (ctx && !this.__slopType) {
+      this.__slopType = type;
+      if (type === '2d' && this.__slopRatio) {
+        ctx.setTransform(this.__slopRatio, 0, 0, this.__slopRatio, 0, 0);
+      }
+    }
+    return ctx;
+  };
+
   function size() { return { w: window.innerWidth, h: window.innerHeight }; }
 
   var SLOP = {
     get width() { return window.innerWidth; },
     get height() { return window.innerHeight; },
     /* Size a canvas to the frame, accounting for device pixel ratio, and keep
-       it sized as the frame changes. Draw in CSS pixels; the scaling is done. */
+       it sized as the frame changes. Draw in CSS pixels; for a 2D canvas the
+       scaling is done. Works for WebGL canvases too, before or after the
+       renderer exists - pass onResize to resize the renderer and camera. */
     fit: function (canvas, onResize) {
       function apply() {
         var d = size(), ratio = window.devicePixelRatio || 1;
+        canvas.__slopRatio = ratio;
         canvas.width = Math.max(1, Math.round(d.w * ratio));
         canvas.height = Math.max(1, Math.round(d.h * ratio));
         canvas.style.width = d.w + 'px';
         canvas.style.height = d.h + 'px';
-        var ctx = canvas.getContext('2d');
-        if (ctx && ctx.setTransform) ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        if (canvas.__slopType === '2d') {
+          nativeGetContext.call(canvas, '2d').setTransform(ratio, 0, 0, ratio, 0, 0);
+        }
         if (onResize) onResize(d.w, d.h);
       }
       apply();
