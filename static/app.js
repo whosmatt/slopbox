@@ -209,10 +209,14 @@
           frame = document.createElement('iframe');
           frame.id = 'qb-sketch';
           frame.title = 'Decorative sketch';
-          /* No allow-same-origin, ever: that would hand the frame this page. */
-          frame.setAttribute('sandbox', 'allow-scripts');
           frame.setAttribute('referrerpolicy', 'no-referrer');
         }
+        /* The server decides the sandbox (never allow-same-origin: that would
+           hand the frame this page). Both only take effect when the frame next
+           navigates, which the src change below always causes on a publish. */
+        frame.setAttribute('sandbox', d.sketchSandbox || 'allow-scripts');
+        if (d.sketchAllow) frame.setAttribute('allow', d.sketchAllow);
+        else frame.removeAttribute('allow');
         frame.className = d.sketchClass || '';
         var src = d.sketchSrc + '&v=' + (version || d.version || Date.now());
         if (frame.getAttribute('src') !== src) frame.setAttribute('src', src);

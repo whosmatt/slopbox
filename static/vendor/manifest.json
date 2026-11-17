@@ -4,6 +4,7 @@
     "license": "MIT",
     "files": [
       "three/addons/controls/OrbitControls.js",
+      "three/addons/controls/PointerLockControls.js",
       "three/addons/environments/RoomEnvironment.js",
       "three/addons/geometries/RoundedBoxGeometry.js",
       "three/addons/math/ImprovedNoise.js",

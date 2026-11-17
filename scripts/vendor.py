@@ -40,6 +40,7 @@ PACKAGES = {
         "addons_root": "examples/jsm/",
         "addons": [
             "controls/OrbitControls.js",
+            "controls/PointerLockControls.js",
             "postprocessing/EffectComposer.js",
             "postprocessing/RenderPass.js",
             "postprocessing/ShaderPass.js",

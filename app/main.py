@@ -191,6 +191,18 @@ def _sketch_meta(kind, version=None):
     return {"placement": placement, "interactive": interactive}
 
 
+# What the sketch frame may do, by interactivity. Interactive frames (games,
+# instruments) may also lock the pointer and go fullscreen - both need a click
+# inside the frame first, and the browser always lets Esc out of either, with
+# its own notice. The frame is still an opaque origin with no network.
+# "fullscreen *" rather than the default 'src' allowlist: the frame's origin is
+# opaque, so it would not match 'src', and the frame only ever loads our sketch.
+SKETCH_PERMISSIONS = {
+    False: ("allow-scripts", ""),
+    True: ("allow-scripts allow-pointer-lock", "fullscreen *"),
+}
+
+
 def _parts_for(kind, version=None):
     """The decor markup and sketch frame that belong with a given stylesheet.
 
@@ -223,10 +235,11 @@ def _parts_for(kind, version=None):
         classes = PLACEMENTS[placement]
         if meta["interactive"]:
             classes += " qb-sketch-live"
+        sandbox, allow = SKETCH_PERMISSIONS[bool(meta["interactive"])]
         frame = (
             '<iframe id="qb-sketch" class="%s" title="Interactive sketch" '
-            'sandbox="allow-scripts" referrerpolicy="no-referrer" src="%s"></iframe>'
-            % (classes, src)
+            'sandbox="%s"%s referrerpolicy="no-referrer" src="%s"></iframe>'
+            % (classes, sandbox, (' allow="%s"' % allow) if allow else "", src)
         )
     return decor_html, frame, (placement if frame else ""), meta
 
@@ -761,6 +774,8 @@ async def api_design():
         "sketchClass": (PLACEMENTS.get(placement, "")
                         + (" qb-sketch-live" if sketch_meta["interactive"] else "")),
         "interactive": sketch_meta["interactive"],
+        "sketchSandbox": SKETCH_PERMISSIONS[bool(sketch_meta["interactive"])][0],
+        "sketchAllow": SKETCH_PERMISSIONS[bool(sketch_meta["interactive"])][1],
         "sketchSrc": "/sketch.html?v=live",
         "price": _price_for("live"),
         "spent": cost.spent_tag(meta.get("spent")),
