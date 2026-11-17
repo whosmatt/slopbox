@@ -442,6 +442,20 @@ PLAY_MAX_ACTIONS = 40
 PLAY_MAX_MS = 12000
 PLAY_MAX_SHOTS = 6
 
+# Hard ceilings on one browser job, end to end. Individual Playwright calls
+# have their own timeouts, but evaluate() has none: a sketch stuck in a
+# synchronous loop can freeze the renderer and leave a check waiting forever,
+# holding the pool lock - the run then shows "working" until a restart.
+# Normal jobs take a fraction of this even with software WebGL.
+INSPECT_LIMIT_S = 90
+PLAY_LIMIT_S = 60
+
+FROZE = (
+    "the page did not finish %s within %ds and the browser was reset. The sketch "
+    "most likely froze the page: an endless loop, or very heavy synchronous work "
+    "at load or in an event handler. Nothing was published."
+)
+
 
 class BrowserPool:
     """One long-lived Chromium, reused for every check. No per-run processes."""
@@ -486,7 +500,54 @@ class BrowserPool:
         page = await context.new_page()
         return context, page
 
+    async def _kill(self):
+        """Tear the browser down without waiting on anything inside it.
+
+        Closing Chromium is also what unblocks a call stuck in a frozen page:
+        it fails with a closed-target error instead of waiting forever.
+        """
+        browser, pw = self._browser, self._pw
+        self._browser, self._pw = None, None
+        for closer in (browser and browser.close, pw and pw.stop):
+            if closer is None:
+                continue
+            try:
+                await asyncio.wait_for(closer(), timeout=10)
+            except Exception:
+                pass
+
+    async def _limited(self, job, limit):
+        """Run a browser job with a hard total time limit. Returns the job's
+        result, or None if it had to be killed."""
+        task = asyncio.ensure_future(job)
+        done, _ = await asyncio.wait({task}, timeout=limit)
+        if task in done:
+            return task.result()
+        # Deliberately not asyncio.wait_for: it waits for the cancelled task to
+        # finish unwinding, and a task stuck in a frozen page never does.
+        task.cancel()
+        await self._kill()
+        await asyncio.wait({task}, timeout=15)
+        if task.done() and not task.cancelled():
+            task.exception()  # retrieved, so asyncio does not warn about it
+        return None
+
     async def inspect(self, url, screenshot_only=False, viewports=None, samples=None):
+        report = await self._limited(
+            self._inspect(url, screenshot_only, viewports, samples), INSPECT_LIMIT_S
+        )
+        if report is None:
+            what = "rendering" if screenshot_only else "validation"
+            report = Report(ok=False, problems=["[timeout] " + FROZE % (what, INSPECT_LIMIT_S)])
+        return report
+
+    async def play(self, url, actions, viewport=None):
+        result = await self._limited(self._play(url, actions, viewport), PLAY_LIMIT_S)
+        if result is None:
+            result = PlayResult(error=FROZE % ("the test play", PLAY_LIMIT_S))
+        return result
+
+    async def _inspect(self, url, screenshot_only=False, viewports=None, samples=None):
         """Load `url` at each viewport, run the checks, grab screenshots."""
         if self._browser is None:
             await self.start()
@@ -590,7 +651,7 @@ class BrowserPool:
             shots=shots, sketch_log=sketch_log,
         )
 
-    async def play(self, url, actions, viewport=None):
+    async def _play(self, url, actions, viewport=None):
         """Load the page and drive the sketch frame with real input.
 
         Input goes through the page exactly as a visitor's would, so a
@@ -690,7 +751,12 @@ class BrowserPool:
                     await shot("end")
                 result.log = await read_sketch_log(page) or []
             except Exception as exc:
-                result.error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+                result.error = "%s: %s" % (type(exc).__name__, str(exc).split(chr(10))[0][:200])
+                if "Timeout" in type(exc).__name__:
+                    result.error += (
+                        " - the page stopped responding, so the sketch has most likely "
+                        "frozen it (an endless loop, or very heavy synchronous work)"
+                    )
             finally:
                 await context.close()
         return result

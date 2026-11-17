@@ -249,9 +249,11 @@
       case 'tool':
         setStatus({
           get_current_design: 'reading the current design…',
-          write_decor: 'drawing markup…',
-          write_sketch: 'writing a sketch…',
-          write_css: 'writing CSS…',
+          write_decor: 'checking the markup…',
+          write_sketch: 'applying the sketch…',
+          edit_sketch: 'applying the patch…',
+          play_sketch: 'test-playing the sketch…',
+          write_css: 'checking the CSS…',
           screenshot: 'looking at the result…',
           publish: 'validating in a real browser…',
           finish: 'done'

@@ -685,6 +685,26 @@ def prepare_tool_calls(tool_calls, truncated=False):
     return outgoing, prepared
 
 
+# What the visitor's status line says while a tool call's arguments are still
+# streaming in. A 60KB sketch is several minutes of output that would otherwise
+# show nothing at all, which reads as a hang.
+DRAFTING = {
+    "write_css": "writing bad CSS",
+    "write_decor": "adding pointless content",
+    "write_sketch": "writing interactive nonsense",
+    "edit_sketch": "patching the sketch",
+    "play_sketch": "playtesting nonsense",
+}
+DRAFT_UPDATE_S = 0.75
+
+
+def drafting_status(name, size):
+    label = DRAFTING.get(name, "preparing " + str(name))
+    if size < 1024:
+        return "%s…" % label
+    return "%s… %.1f KB" % (label, size / 1024)
+
+
 def format_sketch_log(log, limit=30):
     """The sketch's log as lines for the model, errors called out."""
     if log is None:
@@ -1240,6 +1260,16 @@ class Run:
         think_opened = False
         finish_reason = None
 
+        last_draft = 0.0
+
+        def drafting(slot, force=False):
+            nonlocal last_draft
+            now = time.monotonic()
+            if force or now - last_draft >= DRAFT_UPDATE_S:
+                last_draft = now
+                bus.publish({"type": "status",
+                             "text": drafting_status(slot["name"], len(slot["arguments"]))})
+
         def think(piece):
             nonlocal think_opened
             if not think_opened:
@@ -1283,10 +1313,12 @@ class Run:
                         "name": item.name or "",
                         "arguments": item.arguments or "",
                     }
+                    drafting(calls[event.output_index], force=True)
             elif etype == "response.function_call_arguments.delta":
                 slot = calls.get(event.output_index)
                 if slot is not None:
                     slot["arguments"] += event.delta or ""
+                    drafting(slot)
 
             elif etype == "response.output_item.done":
                 item = event.item
