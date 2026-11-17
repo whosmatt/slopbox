@@ -18,7 +18,7 @@ import time
 
 from openai import AsyncOpenAI, BadRequestError
 
-from . import bus, resources, store
+from . import bus, cost, resources, store
 from .config import (
     ENABLE_ASSETS,
     ENABLE_FONTS,
@@ -198,6 +198,16 @@ THE PAGE (fixed HTML you cannot change - style it, do not expect to alter it):
   .msg.thinking      is a <details>: <summary> holds .msg-role and .msg-peek
                      (a one-line preview), and .msg-text holds the full text,
                      shown only when open. Keep the summary clickable.
+  #qb-price          a price tag in the top right corner of the page, showing
+                     what building the live design cost (yes, including you).
+                     By default a yellow starburst drawn by its ::before
+                     (outline) and ::after (fill) with clip-path; inside it
+                     #qb-price-amount holds the price, and #qb-price-detail is a
+                     token breakdown (.qb-price-row > .qb-price-k + .qb-price-v)
+                     shown on :hover / :focus. Restyle and reposition it to suit
+                     the design - shape, colours, rotation, all fair game - but
+                     keep the amount legible and the hover breakdown working.
+                     Do not hide it.
   <body> also carries class "qb-body". Use standard element selectors freely.
 
 YOUR ONLY TOOLS write a candidate stylesheet, look at it, and publish it.
@@ -624,6 +634,8 @@ class Run:
         self.exhausted = False
         self.last_finish_reason = None
         self.last_reasoning: list = []
+        # Token usage across every response in this run, for the price tag.
+        self.usage = cost.empty(LLM_MODEL)
         self.writes = 0
         self._last_nudge_writes = None
         # Cleared once the loop can no longer consume steering, so late prompts
@@ -849,7 +861,7 @@ class Run:
                 parts,
             )
 
-        version = store.publish_candidate(self.prompt)
+        version = store.publish_candidate(self.prompt, usage=cost.priced(self.usage))
         # The validation render IS the final look, so it doubles as the
         # gallery thumbnail - no extra browser work to produce one.
         shot = report.shots.get("desktop")
@@ -991,6 +1003,10 @@ class Run:
         finally:
             self.accepting_steering = False
             store.clear_candidate()
+            if self.version is not None:
+                # Top up the recorded cost with the steps after publish.
+                store.update_usage(self.version, cost.priced(self.usage))
+                bus.publish({"type": "price", "version": self.version})
             bus.publish({"type": "status", "text": "idle", "busy": False})
 
     async def _stream_turn(self):
@@ -1086,11 +1102,15 @@ class Run:
                 elif itype == "reasoning":
                     reasoning.append(item.model_dump(exclude_none=True))
 
+            elif etype == "response.completed":
+                cost.add(self.usage, getattr(event.response, "usage", None))
             elif etype == "response.incomplete":
+                cost.add(self.usage, getattr(event.response, "usage", None))
                 details = getattr(event.response, "incomplete_details", None)
                 if getattr(details, "reason", None) == "max_output_tokens":
                     finish_reason = "length"
             elif etype == "response.failed":
+                cost.add(self.usage, getattr(event.response, "usage", None))
                 error = getattr(event.response, "error", None)
                 raise RuntimeError(
                     "response failed: %s" % (getattr(error, "message", None) or error)

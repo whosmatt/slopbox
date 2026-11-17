@@ -25,7 +25,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
-from . import bus, resources, store
+from . import bus, cost, resources, store
 from .config import (
     ADMIN_TOKEN,
     ENABLE_ASSETS,
@@ -33,6 +33,7 @@ from .config import (
     ENABLE_HTML,
     ENABLE_SKETCH,
     LLM_API_KEY,
+    LLM_MODEL,
     MAX_PROMPT_CHARS,
     RATE_LIMIT_COUNT,
     RATE_LIMIT_WINDOW_SEC,
@@ -230,6 +231,23 @@ def _parts_for(kind, version=None):
     return decor_html, frame, (placement if frame else ""), meta
 
 
+def _price_for(mode, pinned=None):
+    """The price tag markup for a page, or "" when there is nothing to price.
+
+    The preview always gets one - showing the running cost of the build in
+    progress - so the model sees the tag in its screenshots and styles it.
+    """
+    if mode == "safe":
+        return ""
+    if mode == "pinned":
+        return cost.page_tag(store.history_usage(pinned))
+    if mode == "preview":
+        run = ORCHESTRATOR.active
+        usage = run.usage if run is not None else store.read_meta().get("usage")
+        return cost.page_tag(cost.priced(usage or cost.empty(LLM_MODEL)))
+    return cost.page_tag(store.read_meta().get("usage"))
+
+
 def _page(safe_mode=False, preview=False, pinned=None):
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     if safe_mode:
@@ -255,10 +273,13 @@ def _page(safe_mode=False, preview=False, pinned=None):
     return (
         html.replace("<!--FONTS_CSS-->", fonts)
         .replace("<!--CUSTOM_STYLE-->", sheet)
+        .replace("<!--PRICE-->", _price_for(mode, pinned))
         .replace("<!--DECOR-->", decor)
         .replace("<!--SKETCH_TOP-->", top)
         .replace("<!--SKETCH_MAIN-->", main)
         .replace("{{MODE}}", mode)
+        # Config, not visitor input, but escaped all the same.
+        .replace("{{MODEL}}", escape(LLM_MODEL or "An agent"))
     )
 
 
@@ -321,7 +342,11 @@ async def gallery():
                 '<img class="gal-shot" loading="lazy" alt="Screenshot of design %d" '
                 'src="/gallery/%d.jpg">' % (v, v)
                 if e["has_shot"]
-                else '<p class="gal-noshot">no screenshot kept for this one</p>'
+                # A span, not a <p>: the whole card is a link.
+                else '<span class="gal-noshot">no screenshot kept for this one</span>'
+            )
+            shot = '<span class="gal-shotwrap">%s%s</span>' % (
+                shot, cost.gallery_tag(e.get("usage"))
             )
             cards.append(
                 '<a class="gal-card%s" href="/?style=%d">%s'
@@ -624,6 +649,7 @@ async def api_design():
                         + (" qb-sketch-live" if sketch_meta["interactive"] else "")),
         "interactive": sketch_meta["interactive"],
         "sketchSrc": "/sketch.html?v=live",
+        "price": _price_for("live"),
     }
 
 

@@ -135,8 +135,12 @@ def clear_candidate():
             _part_file(part, "candidate").unlink(missing_ok=True)
 
 
-def publish_candidate(prompt):
-    """Promote the candidate to live. Caller must have validated it."""
+def publish_candidate(prompt, usage=None):
+    """Promote the candidate to live. Caller must have validated it.
+
+    usage is what the build cost so far (see cost.py); it rides along with the
+    design so the price tag can show it, live and in the gallery.
+    """
     with _lock:
         css = candidate_css()
         prev = current_css()
@@ -147,6 +151,7 @@ def publish_candidate(prompt):
         meta["publishes"] = int(meta.get("publishes", 0)) + 1
         meta["prompt"] = prompt[:400]
         meta["updated"] = time.time()
+        meta["usage"] = usage
         _write_meta(meta)
         _snapshot(meta["version"], css)
         for part in PARTS:
@@ -158,7 +163,7 @@ def publish_candidate(prompt):
                 _part_file(part, "history", meta["version"]).write_text(
                     text, encoding="utf-8"
                 )
-        _record_history(meta["version"], prompt)
+        _record_history(meta["version"], prompt, usage)
         for part in PARTS:
             _part_file(part, "candidate").unlink(missing_ok=True)
         return meta["version"]
@@ -176,6 +181,7 @@ def rollback():
         meta["version"] = int(meta.get("version", 0)) + 1
         meta["prompt"] = "(rolled back)"
         meta["updated"] = time.time()
+        meta["usage"] = None
         _write_meta(meta)
         CANDIDATE.unlink(missing_ok=True)
         return meta["version"]
@@ -199,6 +205,7 @@ def reset():
         meta["version"] = int(meta.get("version", 0)) + 1
         meta["prompt"] = "(reset)"
         meta["updated"] = time.time()
+        meta["usage"] = None
         _write_meta(meta)
         CANDIDATE.unlink(missing_ok=True)
         return meta["version"]
@@ -248,10 +255,36 @@ def _read_index():
         return {}
 
 
-def _record_history(version, prompt):
+def _record_history(version, prompt, usage=None):
     index = _read_index()
-    index[str(version)] = {"prompt": prompt[:400], "ts": time.time()}
+    index[str(version)] = {"prompt": prompt[:400], "ts": time.time(), "usage": usage}
     HISTORY_INDEX.write_text(json.dumps(index, indent=2), encoding="utf-8")
+
+
+def update_usage(version, usage):
+    """Replace a design's recorded cost with the run's final total.
+
+    publish happens mid-run, and the steps after it (at least the finish call)
+    cost something too, so the figure recorded at publish time is topped up
+    once the run ends.
+    """
+    with _lock:
+        index = _read_index()
+        entry = index.get(str(version))
+        if entry is not None:
+            entry["usage"] = usage
+            HISTORY_INDEX.write_text(json.dumps(index, indent=2), encoding="utf-8")
+        meta = read_meta()
+        if meta.get("version") == version:
+            meta["usage"] = usage
+            _write_meta(meta)
+
+
+def history_usage(version):
+    try:
+        return (_read_index().get(str(int(version))) or {}).get("usage")
+    except (TypeError, ValueError):
+        return None
 
 
 def _versions_on_disk():
@@ -284,6 +317,7 @@ def history_entries():
                 "prompt": note.get("prompt") or "",
                 "ts": note.get("ts") or 0.0,
                 "has_shot": (HISTORY_DIR / ("%06d.jpg" % v)).exists(),
+                "usage": note.get("usage"),
             }
         )
     return entries

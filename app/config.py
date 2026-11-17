@@ -26,6 +26,26 @@ MAX_STEPS = int(os.getenv("MAX_STEPS", "24"))
 # Empty sends no reasoning settings, for models that do not reason.
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "low").strip()
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "12000"))
+
+
+def _price(name, default=None):
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+# US dollars per million tokens, for the price tag on each design. The API does
+# not report prices, so copy them from the provider's pricing page for
+# LLM_MODEL. Unset, the tag shows a token count instead of a cost. Cached input
+# defaults to the full input price, which overstates rather than understates.
+# Reasoning tokens are billed as output and are already counted in it.
+PRICE_INPUT_PER_M = _price("PRICE_INPUT_PER_M", 0.0)
+PRICE_CACHED_INPUT_PER_M = _price("PRICE_CACHED_INPUT_PER_M", PRICE_INPUT_PER_M)
+PRICE_OUTPUT_PER_M = _price("PRICE_OUTPUT_PER_M", 0.0)
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "240000"))
 MAX_CSS_BYTES = int(os.getenv("MAX_CSS_BYTES", "100000"))
 MAX_PROMPT_CHARS = int(os.getenv("MAX_PROMPT_CHARS", "600"))

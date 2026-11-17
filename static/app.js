@@ -165,11 +165,27 @@
      are rendered into the HTML server-side, so before this they only appeared,
      changed or vanished when the visitor reloaded. Pinned and safe pages keep
      what they were served, exactly as they keep their stylesheet. */
+  /* The price tag is server-rendered markup (escaped there), swapped whole.
+     Its state is plain hover/focus, so replacing the node loses nothing. */
+  function refreshPrice(markup) {
+    var old = document.getElementById('qb-price');
+    if (old && old.outerHTML === markup) return;
+    var root = document.getElementById('qb-root');
+    var holder = document.createElement('div');
+    holder.innerHTML = markup;
+    var fresh = holder.firstElementChild;
+    if (old && fresh) old.parentNode.replaceChild(fresh, old);
+    else if (old) old.parentNode.removeChild(old);
+    else if (fresh && root) root.insertBefore(fresh, root.firstChild);
+  }
+
   function refreshParts(version) {
     if (NO_RESTYLE) return;
     fetch('/api/design', { cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
+        refreshPrice(d.price || '');
+
         var decor = document.getElementById('qb-decor');
         if (decor && decor.innerHTML !== d.decor) {
           /* Already through the server-side allowlist sanitiser, and the page
@@ -248,6 +264,10 @@
         restyle(ev.version);
         refreshParts(ev.version);
         setStatus('new look is live');
+        break;
+      case 'price':
+        /* The run has ended and its final cost is recorded. */
+        refreshParts(ev.version);
         break;
       case 'error':
         addMessage('error', ev.text || 'Something went wrong.');

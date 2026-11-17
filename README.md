@@ -275,6 +275,16 @@ Reasoning models shaped the code in two ways:
   `REASONING_EFFORT=low` keeps it deliberating usefully without stalling the UI;
   set it empty to send no reasoning settings at all.
 
+Every reply reports its token usage, and a run adds them up. The total is
+stored with the design it published and shown as a price tag: in the top right
+of the site (the agent may restyle it like anything else) and on each gallery
+thumbnail, with the full breakdown - steps, input, cached, output, reasoning -
+on hover. The API does not report prices, so `PRICE_INPUT_PER_M`,
+`PRICE_CACHED_INPUT_PER_M` and `PRICE_OUTPUT_PER_M` (dollars per million tokens)
+have to be set for it to show a cost; without them it shows a token count. The
+cost is fixed when recorded, so changing prices later does not reprice old
+designs. Designs built before this existed simply have no tag.
+
 Context is bounded rather than trusted to stay small: every run starts fresh,
 old screenshots are replaced by a placeholder so only the newest image is ever
 in context, and the transcript is mechanically compacted once it exceeds

@@ -26,6 +26,14 @@ services:
       MAX_STEPS: "24"
       REASONING_EFFORT: "low"
       MAX_TOKENS: "12000"
+
+      # US dollars per million tokens for LLM_MODEL, from the provider's pricing
+      # page. They price the tag showing what each design cost to build (hover
+      # it for the token breakdown). Unset, the tag shows a token count instead.
+      # Cached input defaults to the full input price.
+      PRICE_INPUT_PER_M: ""
+      PRICE_CACHED_INPUT_PER_M: ""
+      PRICE_OUTPUT_PER_M: ""
       MAX_CONTEXT_CHARS: "240000"
       MAX_CSS_BYTES: "100000"
       MAX_PROMPT_CHARS: "600"
