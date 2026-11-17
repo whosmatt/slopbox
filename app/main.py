@@ -25,7 +25,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
-from . import bus, cost, resources, store
+from . import bus, cost, resources, store, vendor
 from .config import (
     ADMIN_TOKEN,
     ENABLE_ASSETS,
@@ -407,6 +407,62 @@ async def candidate_css(request: Request):
     )
 
 
+# Runs before anything the agent wrote, so it sees every error. The validator
+# reads window.__slopLog back after rendering and hands it to the model: without
+# it, a sketch that throws on line 3 looks exactly like a blank canvas.
+SKETCH_LOGGER = r"""
+<script>
+(function () {
+  var log = [];
+  window.__slopLog = log;
+  window.TONE_SILENCE_LOGGING = true;  // its banner is noise in the log
+  function push(kind, text) {
+    if (log.length >= 80) return;
+    log.push({ k: kind, m: String(text).slice(0, 400), t: Math.round(performance.now()) });
+  }
+  function offset() {
+    return +(document.body && document.body.getAttribute('data-line-offset')) || 0;
+  }
+  function where(file, line) {
+    if (!line) return '';
+    if (file && file.indexOf('/vendor/') !== -1) {
+      return ' (in ' + file.replace(/^.*\/vendor\//, 'vendor/').split('?')[0] + ':' + line + ')';
+    }
+    return ' (sketch line ' + Math.max(1, line - offset()) + ')';
+  }
+  function fmt(a) {
+    if (a instanceof Error) return a.stack || a.message;
+    if (a && typeof a === 'object') {
+      try { return JSON.stringify(a).slice(0, 200); } catch (e) { return String(a); }
+    }
+    return String(a);
+  }
+  window.addEventListener('error', function (e) {
+    var t = e.target;
+    if (t && t !== window && t.nodeType === 1) {
+      push('error', 'failed to load ' + (t.src || t.href || t.tagName.toLowerCase()));
+      return;
+    }
+    push('error', (e.message || 'error') + where(e.filename, e.lineno));
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    push('error', 'unhandled promise rejection: ' + ((r && (r.stack || r.message)) || r));
+  });
+  document.addEventListener('securitypolicyviolation', function (e) {
+    push('error', 'blocked by the sandbox: ' + e.effectiveDirective + ' ' + (e.blockedURI || ''));
+  });
+  ['error', 'warn', 'log', 'info'].forEach(function (level) {
+    var orig = console[level];
+    console[level] = function () {
+      try { push('console.' + level, Array.prototype.map.call(arguments, fmt).join(' ')); } catch (e) {}
+      return orig.apply(console, arguments);
+    };
+  });
+})();
+</script>
+"""
+
 SKETCH_HARNESS = """
 <style>
 html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent}
@@ -499,11 +555,21 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:t
 </script>
 """
 
-SKETCH_SKELETON = (
+SKETCH_HEAD = (
     '<!doctype html><html><head><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width,initial-scale=1">'
-    "%s</head><body data-interactive=\"%s\">%s</body></html>"
+    "%s</head><body data-interactive=\"%s\" data-line-offset=\"%d\">"
 )
+
+
+def sketch_document(body, interactive):
+    """Wrap the agent's sketch in our head. The line offset lets the logger
+    report errors in the agent's own line numbers, not the document's."""
+    head = SKETCH_LOGGER + SKETCH_HARNESS + vendor.IMPORT_MAP
+    prefix = SKETCH_HEAD % (head, "1" if interactive else "0", 0)
+    prefix = SKETCH_HEAD % (head, "1" if interactive else "0", prefix.count(chr(10)))
+    return prefix + body + "</body></html>"
+
 
 # The sketch is contained by origin, not by sanitising its script: an opaque
 # origin plus this policy means it can render and animate but cannot reach the
@@ -511,7 +577,12 @@ SKETCH_SKELETON = (
 # anywhere but here.
 SKETCH_CSP = (
     "default-src 'none'; "
-    "script-src 'unsafe-inline'; "
+    # 'self' is the vendored libraries under /vendor, nothing else on the site
+    # holds script a sketch could usefully load. blob: is Tone.js building its
+    # clock worker and audio worklets in memory - code the sketch could already
+    # run inline, and a blob worker inherits this same no-network policy.
+    "script-src 'unsafe-inline' 'self' blob:; "
+    "worker-src blob:; "
     "style-src 'unsafe-inline'; "
     "img-src data:; "
     "connect-src 'none'; "
@@ -546,9 +617,30 @@ async def sketch_html(request: Request):
         "live" if which == "live" else "pinned")
     meta = _sketch_meta(kind, None if kind != "pinned" else int(which))
     return HTMLResponse(
-        SKETCH_SKELETON % (SKETCH_HARNESS, "1" if meta.get("interactive") else "0", body),
+        sketch_document(body, meta.get("interactive")),
         headers={"Content-Security-Policy": SKETCH_CSP, "Cache-Control": "no-store"},
     )
+
+
+@app.get("/vendor/{path:path}")
+async def vendor_file(path: str, request: Request):
+    if not ENABLE_SKETCH:
+        raise HTTPException(status_code=404, detail="sketches are disabled")
+    file = vendor.FILES.get(path)
+    if file is None or not file.is_file():
+        raise HTTPException(status_code=404, detail="not a vendored file")
+    headers = {
+        # Sketch frames have an opaque origin, so their module imports arrive
+        # as cross-origin CORS requests. These are public library files.
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "public, max-age=86400",
+        "Vary": "Accept-Encoding",
+    }
+    zipped = file.with_name(file.name + ".gz")
+    if "gzip" in request.headers.get("accept-encoding", "") and zipped.is_file():
+        headers["Content-Encoding"] = "gzip"
+        file = zipped
+    return FileResponse(file, media_type="text/javascript", headers=headers)
 
 
 @app.get("/fonts.css")

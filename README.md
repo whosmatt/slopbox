@@ -158,7 +158,7 @@ removes the tool, drops it from the system prompt, and closes the route.
 | `ENABLE_FONTS` | four locally served font families (`"Slop Sans/Serif/Mono/Narrow"`) |
 | `ENABLE_ASSETS` | twelve tileable patterns via `url(/assets/NAME)` |
 | `ENABLE_HTML` | inert markup and inline SVG in `#qb-decor`, via `write_decor` |
-| `ENABLE_SKETCH` | a sandboxed scripted frame `#qb-sketch`, via `write_sketch` |
+| `ENABLE_SKETCH` | a sandboxed scripted frame `#qb-sketch`, via `write_sketch`, `edit_sketch` and `play_sketch`, with three.js, Tone.js and matter.js available |
 
 **Fonts** are the Liberation faces Debian already installs for Chromium, served
 from `/fonts/`. Serving them matters for honesty as much as looks: a *system*
@@ -228,6 +228,28 @@ the only honest way to allow JS here. The frame is `sandbox="allow-scripts"`
 actively tries to escape: parent DOM, `top.location`, cookies, `localStorage` and
 `document.getElementById('slopbox-guard').remove()` all raise `SecurityError`,
 and `origin` reads `"null"`.
+
+**Libraries.** Sketches can load three.js (as an ES module, with a handful of
+add-ons), Tone.js and matter.js from `/vendor/`, which serves a fixed set of
+files written by `scripts/vendor.py` from pinned, integrity-checked npm packages
+and committed to the repo - nothing is fetched at build or run time. The
+sketch's policy allows script from `'self'` (that is all `/vendor` holds) and
+`blob:` workers (Tone builds its clock worker in memory; a blob worker inherits
+the same no-network policy). `/vendor` answers with
+`Access-Control-Allow-Origin: *` because module imports from an opaque-origin
+frame are CORS requests, and serves pre-gzipped twins - three.js is about 2MB
+raw, 420KB compressed. To upgrade, bump a version in `scripts/vendor.py` and run
+it.
+
+**Sketch feedback.** A small logger runs in every sketch before the agent's own
+code and records uncaught errors, failed loads, policy violations and console
+output, with error line numbers mapped back to the sketch's own lines. Screenshot
+and publish hand that log to the model, and publish refuses a sketch that throws:
+otherwise a sketch that dies on line 3 looks exactly like a blank canvas.
+`play_sketch` drives the frame with real clicks, drags and held keys and returns
+frames over time (capped at 40 actions, 6 shots, 12s), and `edit_sketch` patches
+a sketch by exact find/replace instead of rewriting tens of kilobytes to fix one
+line.
 
 That distinction is the whole reason JS in the *main* document stays off the
 table: script there could delete the guard's shadow host and outlast the
@@ -335,6 +357,7 @@ Disk footprint is bounded by construction, not by a cleanup job:
 | `GET /fonts.css`, `/fonts/{file}` | locally served font faces |
 | `GET /assets/{name}` | built-in tileable patterns |
 | `GET /sketch.html` | the sandboxed frame's document |
+| `GET /vendor/{file}` | libraries sketches may load (fixed list) |
 | `GET /gallery` | recent designs as thumbnails |
 | `GET /gallery/{n}.jpg` | one design's thumbnail |
 | `GET /history/{n}.css` | one design's frozen stylesheet |

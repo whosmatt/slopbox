@@ -18,7 +18,7 @@ import time
 
 from openai import AsyncOpenAI, BadRequestError
 
-from . import bus, cost, resources, store
+from . import bus, cost, resources, store, vendor
 from .config import (
     ENABLE_ASSETS,
     ENABLE_FONTS,
@@ -285,9 +285,20 @@ if ENABLE_SKETCH:
         "pass interactive:true - do not try to arrange it in CSS. The frame then "
         "captures clicks and keys, shows a click-to-play badge, releases on Escape, "
         "and stops arrow keys scrolling the page. "
+        "Synths, toys and small games are very welcome here - go beyond decoration "
+        "when the request invites it. TESTING A SKETCH: screenshot and publish both "
+        "report what the frame logged - uncaught errors with your own line numbers, "
+        "failed library loads, console output - and publish REFUSES a sketch that "
+        "throws. play_sketch drives it with real clicks, drags and held keys and "
+        "returns frames over time, so you can see that a game responds and that "
+        "things move; one or two test plays are plenty. Fix bugs with edit_sketch "
+        "(exact find/replace) rather than rewriting the whole sketch. "
     )
 if _STRUCTURE:
     SYSTEM_PROMPT = SYSTEM_PROMPT + chr(10) + chr(10) + _STRUCTURE
+
+if ENABLE_SKETCH and vendor.prompt_section():
+    SYSTEM_PROMPT = SYSTEM_PROMPT + chr(10) + chr(10) + vendor.prompt_section()
 
 _RESOURCES = resources.prompt_section(ENABLE_FONTS, ENABLE_ASSETS)
 if _RESOURCES:
@@ -465,10 +476,101 @@ SKETCH_TOOL = {
     },
 }
 
+EDIT_SKETCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "edit_sketch",
+        "description": (
+            "Patch your sketch instead of rewriting it: each edit replaces one exact, "
+            "unique occurrence of `find` with `replace`, in order. Works on your draft "
+            "sketch, or the live one if you have not written a draft this turn. "
+            "Placement and interactivity are kept. Not live until you publish."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "find": {
+                                "type": "string",
+                                "description": "Exact text to replace; must occur exactly once. "
+                                "Include enough surrounding code to be unique.",
+                            },
+                            "replace": {"type": "string"},
+                        },
+                        "required": ["find", "replace"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["edits"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+PLAY_SKETCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "play_sketch",
+        "description": (
+            "Test-drive the draft sketch in a real browser with scripted input and "
+            "see what happens: returns frame screenshots at the moments you choose, "
+            "plus everything the sketch logged. Input arrives exactly as a visitor's "
+            "would - a frame that is not interactive will not receive it. Coordinates "
+            "are pixels inside the frame (default: its centre). At most %d actions, "
+            "%d screenshots and %ds of waiting and key-holding in total."
+            % (40, 6, 12)
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "do": {
+                                "type": "string",
+                                "enum": ["click", "move", "drag", "key", "type", "wait", "shot"],
+                            },
+                            "x": {"type": "number"},
+                            "y": {"type": "number"},
+                            "to_x": {"type": "number", "description": "drag end"},
+                            "to_y": {"type": "number", "description": "drag end"},
+                            "key": {
+                                "type": "string",
+                                "description": "KeyboardEvent key name: ArrowLeft, Space, "
+                                "Enter, a, ...",
+                            },
+                            "hold_ms": {"type": "number", "description": "for key; default 60"},
+                            "text": {"type": "string", "description": "for type"},
+                            "ms": {"type": "number", "description": "for wait"},
+                            "label": {"type": "string", "description": "for shot"},
+                        },
+                        "required": ["do"],
+                        "additionalProperties": False,
+                    },
+                    "description": "e.g. click to start, hold ArrowRight 800ms, shot, "
+                    "wait 1000, shot.",
+                },
+                "viewport": {"type": "string", "enum": ["desktop", "mobile"]},
+            },
+            "required": ["actions"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 if ENABLE_HTML:
     TOOLS.append(DECOR_TOOL)
 if ENABLE_SKETCH:
     TOOLS.append(SKETCH_TOOL)
+    TOOLS.append(EDIT_SKETCH_TOOL)
+    TOOLS.append(PLAY_SKETCH_TOOL)
 
 RESPONSES_TOOLS = _responses_tools(TOOLS)
 
@@ -581,6 +683,21 @@ def prepare_tool_calls(tool_calls, truncated=False):
             {"id": tc["id"], "name": tc["name"], "args": args or {}, "error": error}
         )
     return outgoing, prepared
+
+
+def format_sketch_log(log, limit=30):
+    """The sketch's log as lines for the model, errors called out."""
+    if log is None:
+        return ""
+    if not log:
+        return "Sketch log: no errors, no console output."
+    lines = ["Sketch log (%d entr%s):" % (len(log), "y" if len(log) == 1 else "ies")]
+    for e in log[:limit]:
+        kind = "ERROR" if e.get("k") == "error" else e.get("k", "?")
+        lines.append("  [%5dms] %s: %s" % (int(e.get("t") or 0), kind, e.get("m", "")))
+    if len(log) > limit:
+        lines.append("  ... %d more" % (len(log) - limit))
+    return chr(10).join(lines)
 
 
 def _b64_image(data):
@@ -738,10 +855,13 @@ class Run:
                 if decor else ["", "(none)"]
             )
         if ENABLE_SKETCH:
-            sketch = store.current_part("sketch").strip()
-            parts += ["", "Sketch frame #qb-sketch:"]
+            # The draft if this run wrote one, else the live sketch - the same
+            # text edit_sketch patches, in full, so a find string can be copied.
+            sketch = store.candidate_part("sketch").strip()
+            parts += ["", "Sketch frame #qb-sketch (your draft if you wrote one this turn, "
+                      "otherwise the live one), in full:"]
             parts += (
-                ["", clip(sketch, 4000), "",
+                ["", sketch, "",
                  "To remove it entirely, call write_sketch with an empty string. "
                  "Rewriting only the stylesheet does NOT remove it."]
                 if sketch else ["", "(none)"]
@@ -835,7 +955,8 @@ class Run:
         for label, data in report.shots.items():
             parts.append({"type": "text", "text": label + " view:"})
             parts.append({"type": "image_url", "image_url": {"url": _b64_image(data)}})
-        return "Screenshots attached below.", parts
+        log = format_sketch_log(report.sketch_log)
+        return "Screenshots attached below." + ((chr(10) + log) if log else ""), parts
 
     async def _tool_publish(self, args):
         if not store.has_candidate():
@@ -873,10 +994,81 @@ class Run:
         self.version = version
         bus.publish({"type": "reload", "version": version})
         bus.publish({"type": "status", "text": "published v%d" % version})
+        log = format_sketch_log(report.sketch_log)
         return (
             "PUBLISHED as version %d. It is live for everyone now. %s Call finish."
             % (version, report.summary())
+            + ((chr(10) + log) if log else "")
         ), None
+
+    async def _tool_edit_sketch(self, args):
+        edits = args.get("edits")
+        if not isinstance(edits, list) or not edits:
+            return "Rejected: pass edits as a list of {find, replace}.", None
+        text = store.candidate_part("sketch")
+        if not text.strip():
+            return "There is no sketch to edit - use write_sketch first.", None
+        changed_lines = []
+        for i, e in enumerate(edits, 1):
+            find = e.get("find") if isinstance(e, dict) else None
+            repl = e.get("replace") if isinstance(e, dict) else None
+            if not isinstance(find, str) or not find or not isinstance(repl, str):
+                return "Rejected: edit %d needs a non-empty find and a replace string. " \
+                    "Nothing was applied." % i, None
+            count = text.count(find)
+            if count != 1:
+                return (
+                    "Rejected: edit %d's find text occurs %d times in the sketch (it must "
+                    "occur exactly once). Nothing was applied. %s"
+                    % (i, count, "Call get_current_design to see the exact text."
+                       if count == 0 else "Include more surrounding code.")
+                ), None
+            changed_lines.append(text[: text.index(find)].count(chr(10)) + 1)
+            text = text.replace(find, repl, 1)
+        size = len(text.encode("utf-8"))
+        if size > MAX_SKETCH_BYTES:
+            return (
+                "Rejected: the edited sketch would be %d bytes, limit %d. Nothing was "
+                "applied." % (size, MAX_SKETCH_BYTES)
+            ), None
+        # Placement and interactivity carry over on their own: an unwritten
+        # part falls back to what is live.
+        store.set_candidate_part("sketch", text)
+        self.writes += 1
+        self._invalidate_screenshots()
+        return (
+            "Applied %d edit%s at sketch line%s %s (%d bytes now). Not live yet - "
+            "screenshot or play_sketch to check it, then publish."
+            % (len(edits), "" if len(edits) == 1 else "s", "" if len(edits) == 1 else "s",
+               ", ".join(str(n) for n in changed_lines), size)
+        ), None
+
+    async def _tool_play_sketch(self, args):
+        actions = args.get("actions")
+        if not isinstance(actions, list) or not actions:
+            return "Rejected: pass actions as a non-empty list.", None
+        if not store.candidate_part("sketch").strip():
+            return "There is no sketch to play - use write_sketch first.", None
+        from .config import VIEWPORTS
+
+        which = str(args.get("viewport") or "desktop").lower()
+        vp = next((v for v in VIEWPORTS if v[0] == which), VIEWPORTS[0])
+        result = await POOL.play(self_url() + "/preview", actions, viewport=vp)
+        if result.error:
+            return "Test play failed: " + result.error, None
+        lines = ["Test play done (%d screenshot%s)." % (
+            len(result.shots), "" if len(result.shots) == 1 else "s")]
+        lines += ["Note: " + n for n in result.notes]
+        lines.append(format_sketch_log(result.log))
+        parts = [{"type": "text", "text": "Frames from the test play of draft #%d, in order:"
+                  % self.writes}]
+        for name, data in result.shots:
+            parts.append({"type": "text", "text": name + ":"})
+            parts.append({"type": "image_url", "image_url": {"url": _b64_image(data)}})
+        if result.shots:
+            bus.publish({"type": "image", "label": "test play",
+                         "src": _b64_image(result.shots[-1][1])})
+        return chr(10).join(lines), parts
 
     async def _tool_finish(self, args):
         return "__FINISH__" + (args.get("summary") or ""), None
@@ -890,6 +1082,8 @@ class Run:
             "finish": self._tool_finish,
             "write_decor": self._tool_write_decor,
             "write_sketch": self._tool_write_sketch,
+            "edit_sketch": self._tool_edit_sketch,
+            "play_sketch": self._tool_play_sketch,
         }.get(name)
         if handler is None:
             return "Unknown tool: " + str(name), None

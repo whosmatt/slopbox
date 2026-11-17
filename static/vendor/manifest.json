@@ -1,0 +1,43 @@
+{
+  "three": {
+    "version": "0.187.0",
+    "license": "MIT",
+    "files": [
+      "three/addons/controls/OrbitControls.js",
+      "three/addons/environments/RoomEnvironment.js",
+      "three/addons/geometries/RoundedBoxGeometry.js",
+      "three/addons/math/ImprovedNoise.js",
+      "three/addons/math/SimplexNoise.js",
+      "three/addons/postprocessing/AfterimagePass.js",
+      "three/addons/postprocessing/EffectComposer.js",
+      "three/addons/postprocessing/GlitchPass.js",
+      "three/addons/postprocessing/MaskPass.js",
+      "three/addons/postprocessing/OutputPass.js",
+      "three/addons/postprocessing/Pass.js",
+      "three/addons/postprocessing/RenderPass.js",
+      "three/addons/postprocessing/ShaderPass.js",
+      "three/addons/postprocessing/UnrealBloomPass.js",
+      "three/addons/shaders/AfterimageShader.js",
+      "three/addons/shaders/CopyShader.js",
+      "three/addons/shaders/DigitalGlitch.js",
+      "three/addons/shaders/LuminosityHighPassShader.js",
+      "three/addons/shaders/OutputShader.js",
+      "three/three.core.js",
+      "three/three.module.js"
+    ]
+  },
+  "tone": {
+    "version": "15.1.22",
+    "license": "MIT",
+    "files": [
+      "tone/Tone.js"
+    ]
+  },
+  "matter-js": {
+    "version": "0.20.0",
+    "license": "MIT",
+    "files": [
+      "matter/matter.min.js"
+    ]
+  }
+}

@@ -382,6 +382,9 @@ class Report:
     warnings: list = field(default_factory=list)
     info: dict = field(default_factory=dict)
     shots: dict = field(default_factory=dict)  # label -> jpeg bytes
+    # What the sketch frame logged - errors and console output - or None when
+    # the page has no sketch.
+    sketch_log: list = None
 
     def summary(self):
         if self.ok:
@@ -390,6 +393,54 @@ class Report:
                 base += " Warnings: " + "; ".join(self.warnings[:4])
             return base
         return "FAIL - " + " | ".join(self.problems[:6])
+
+
+# Long enough for module imports, a first frame and any setup timers.
+SKETCH_SETTLE_MS = 900
+
+
+async def _sketch_frame(page):
+    for frame in page.frames:
+        if "/sketch.html" in frame.url:
+            return frame
+    return None
+
+
+async def read_sketch_log(page):
+    """The sketch harness's log, or None if there is no sketch frame."""
+    frame = await _sketch_frame(page)
+    if frame is None:
+        return None
+    try:
+        log = await frame.evaluate("() => window.__slopLog || []")
+    except Exception as exc:
+        return [{"k": "error", "t": 0,
+                 "m": "the sketch frame could not be read (%s)" % type(exc).__name__}]
+    return log if isinstance(log, list) else []
+
+
+def _merge_log(into, entries):
+    seen = {(e.get("k"), e.get("m")) for e in into}
+    for e in entries or ():
+        key = (e.get("k"), e.get("m"))
+        if key not in seen:
+            seen.add(key)
+            into.append(e)
+
+
+@dataclass
+class PlayResult:
+    shots: list = field(default_factory=list)  # (label, jpeg bytes)
+    log: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
+    error: str = None
+
+
+# Limits for one test play: enough for "start, steer, shoot, watch", short
+# enough that a run cannot spend a minute per step pressing keys.
+PLAY_MAX_ACTIONS = 40
+PLAY_MAX_MS = 12000
+PLAY_MAX_SHOTS = 6
 
 
 class BrowserPool:
@@ -443,6 +494,7 @@ class BrowserPool:
         samples = samples if samples is not None else SAMPLE_TIMES
 
         problems, warnings, info, shots = [], [], {}, {}
+        sketch_log = None
 
         async with self._lock:
             for label, w, h in viewports:
@@ -452,7 +504,12 @@ class BrowserPool:
                     # through, the browser may only talk to our own origin.
                     await page.route("**/*", _same_origin_only)
                     await page.goto(url, wait_until="load", timeout=20000)
-                    await page.wait_for_timeout(250)
+                    has_sketch = await _sketch_frame(page) is not None
+                    await page.wait_for_timeout(SKETCH_SETTLE_MS if has_sketch else 250)
+                    if has_sketch:
+                        if sketch_log is None:
+                            sketch_log = []
+                        _merge_log(sketch_log, await read_sketch_log(page))
 
                     if screenshot_only:
                         shots[label] = await page.screenshot(type="jpeg", quality=72)
@@ -520,9 +577,123 @@ class BrowserPool:
                 finally:
                     await context.close()
 
+        # A sketch that throws is broken however the page around it looks, and
+        # one that fails to load a library is blank. Console output alone is
+        # not a failure - libraries warn about all sorts of harmless things.
+        if not screenshot_only:
+            errors = [e["m"] for e in (sketch_log or ()) if e.get("k") == "error"]
+            for err in errors[:4]:
+                problems.append("[sketch] " + err)
+
         return Report(
-            ok=not problems, problems=problems, warnings=warnings, info=info, shots=shots
+            ok=not problems, problems=problems, warnings=warnings, info=info,
+            shots=shots, sketch_log=sketch_log,
         )
+
+    async def play(self, url, actions, viewport=None):
+        """Load the page and drive the sketch frame with real input.
+
+        Input goes through the page exactly as a visitor's would, so a
+        click-through (non-interactive) frame does not receive it - which is
+        itself the useful finding.
+        """
+        if self._browser is None:
+            await self.start()
+        label, w, h = viewport or VIEWPORTS[0]
+        result = PlayResult()
+
+        async with self._lock:
+            context, page = await self._page(w, h)
+            try:
+                await page.route("**/*", _same_origin_only)
+                await page.goto(url, wait_until="load", timeout=20000)
+                frame_el = await page.query_selector("#qb-sketch")
+                if frame_el is None:
+                    result.error = "there is no sketch frame on the page"
+                    return result
+                await page.wait_for_timeout(SKETCH_SETTLE_MS)
+                await frame_el.scroll_into_view_if_needed(timeout=3000)
+                box = await frame_el.bounding_box()
+                if not box or box["width"] < 4 or box["height"] < 4:
+                    result.error = "the sketch frame is not visible (it has no size on screen)"
+                    return result
+                classes = await frame_el.get_attribute("class") or ""
+                if "qb-sketch-live" not in classes:
+                    result.notes.append(
+                        "the frame is click-through (interactive is false), so clicks "
+                        "and keys went to the page behind it, not the sketch"
+                    )
+                result.notes.append(
+                    "frame is %dx%d px on a %dx%d %s viewport"
+                    % (box["width"], box["height"], w, h, label)
+                )
+
+                def point(a, kx="x", ky="y"):
+                    def clamp(v, size):
+                        if not isinstance(v, (int, float)):
+                            return size / 2
+                        return max(0, min(size - 1, v))
+                    return (box["x"] + clamp(a.get(kx), box["width"]),
+                            box["y"] + clamp(a.get(ky), box["height"]))
+
+                async def shot(name):
+                    data = await frame_el.screenshot(type="jpeg", quality=72, timeout=5000)
+                    result.shots.append((name, data))
+
+                budget = PLAY_MAX_MS
+                clock = 0
+                for i, a in enumerate(actions[:PLAY_MAX_ACTIONS]):
+                    if not isinstance(a, dict):
+                        continue
+                    kind = a.get("do")
+                    try:
+                        if kind == "click":
+                            await page.mouse.click(*point(a))
+                        elif kind == "move":
+                            await page.mouse.move(*point(a), steps=8)
+                        elif kind == "drag":
+                            await page.mouse.move(*point(a))
+                            await page.mouse.down()
+                            await page.mouse.move(*point(a, "to_x", "to_y"), steps=12)
+                            await page.mouse.up()
+                        elif kind == "key":
+                            key = str(a.get("key") or "")
+                            hold = int(min(max(a.get("hold_ms") or 60, 0), budget))
+                            await page.keyboard.down(key)
+                            await page.wait_for_timeout(hold)
+                            await page.keyboard.up(key)
+                            budget -= hold
+                            clock += hold
+                        elif kind == "type":
+                            await page.keyboard.type(str(a.get("text") or "")[:80], delay=30)
+                        elif kind == "wait":
+                            ms = int(min(max(a.get("ms") or 0, 0), budget))
+                            await page.wait_for_timeout(ms)
+                            budget -= ms
+                            clock += ms
+                        elif kind == "shot":
+                            if len(result.shots) < PLAY_MAX_SHOTS:
+                                await shot(str(a.get("label") or "t+%.1fs" % (clock / 1000)))
+                            else:
+                                result.notes.append("step %d: shot limit reached" % (i + 1))
+                        else:
+                            result.notes.append("step %d: unknown action %r, skipped" % (i + 1, kind))
+                    except Exception as exc:
+                        result.notes.append("step %d (%s) failed: %s" % (i + 1, kind, str(exc)[:120]))
+                    if budget <= 0:
+                        result.notes.append("stopped after step %d: the %ds time budget ran out"
+                                            % (i + 1, PLAY_MAX_MS // 1000))
+                        break
+                if len(actions) > PLAY_MAX_ACTIONS:
+                    result.notes.append("only the first %d actions ran" % PLAY_MAX_ACTIONS)
+                if not result.shots:
+                    await shot("end")
+                result.log = await read_sketch_log(page) or []
+            except Exception as exc:
+                result.error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+            finally:
+                await context.close()
+        return result
 
 
 POOL = BrowserPool()
